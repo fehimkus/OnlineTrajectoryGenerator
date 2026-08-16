@@ -1,0 +1,264 @@
+<mxfile host="app.diagrams.net" modified="2026-07-26T00:00:00.000Z" agent="UltimateMotion" version="24.0.0" type="device">
+  <diagram name="Jerk Limited Motion" id="jerkLimitedMotion">
+    <mxGraphModel dx="800" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connectable="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="700" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Title -->
+        <mxCell id="title" value="Jerk-Limitli Frenleme Profili &#8212; brake_distance (TrajectoryGenerator.cpp)" style="text;html=1;align=center;verticalAlign=middle;fontSize=16;fontStyle=1;fontColor=#52514E;" vertex="1" parent="1">
+          <mxGeometry x="20" y="12" width="620" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- Chart titles -->
+        <mxCell id="lblJerk" value="JERK (j)" style="text;html=1;align=left;verticalAlign=middle;fontSize=12;fontStyle=1;fontColor=#52514E;" vertex="1" parent="1">
+          <mxGeometry x="120" y="70" width="120" height="16" as="geometry" />
+        </mxCell>
+        <mxCell id="lblAcc" value="İVME (a)" style="text;html=1;align=left;verticalAlign=middle;fontSize=12;fontStyle=1;fontColor=#52514E;" vertex="1" parent="1">
+          <mxGeometry x="120" y="200" width="120" height="16" as="geometry" />
+        </mxCell>
+        <mxCell id="lblVel" value="HIZ (v)" style="text;html=1;align=left;verticalAlign=middle;fontSize=12;fontStyle=1;fontColor=#52514E;" vertex="1" parent="1">
+          <mxGeometry x="120" y="380" width="120" height="16" as="geometry" />
+        </mxCell>
+        <mxCell id="lblPos" value="KONUM (x)" style="text;html=1;align=left;verticalAlign=middle;fontSize=12;fontStyle=1;fontColor=#52514E;" vertex="1" parent="1">
+          <mxGeometry x="120" y="560" width="120" height="16" as="geometry" />
+        </mxCell>
+
+        <!-- ===================== JERK CHART ===================== -->
+        <mxCell id="baseJerk" value="" style="endArrow=none;html=1;strokeColor=#C3C2B7;strokeWidth=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="120" y="140" as="sourcePoint" />
+            <mxPoint x="600" y="140" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="refPlusJ" value="" style="endArrow=none;dashed=1;html=1;strokeColor=#C3C2B7;strokeWidth=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="120" y="105" as="sourcePoint" />
+            <mxPoint x="600" y="105" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="refMinusJ" value="" style="endArrow=none;dashed=1;html=1;strokeColor=#C3C2B7;strokeWidth=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="120" y="175" as="sourcePoint" />
+            <mxPoint x="600" y="175" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tickPlusJ" value="+J" style="text;html=1;align=right;verticalAlign=middle;fontSize=10;fontColor=#898781;" vertex="1" parent="1">
+          <mxGeometry x="55" y="97" width="60" height="16" as="geometry" />
+        </mxCell>
+        <mxCell id="tickZeroJ" value="0" style="text;html=1;align=right;verticalAlign=middle;fontSize=10;fontColor=#898781;" vertex="1" parent="1">
+          <mxGeometry x="55" y="132" width="60" height="16" as="geometry" />
+        </mxCell>
+        <mxCell id="tickMinusJ" value="-J" style="text;html=1;align=right;verticalAlign=middle;fontSize=10;fontColor=#898781;" vertex="1" parent="1">
+          <mxGeometry x="55" y="167" width="60" height="16" as="geometry" />
+        </mxCell>
+        <mxCell id="curveJerk" value="" style="endArrow=none;html=1;rounded=0;strokeWidth=2.5;strokeColor=#2A78D6;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="120" y="175" as="sourcePoint" />
+            <mxPoint x="580" y="105" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="340" y="175" />
+              <mxPoint x="340" y="140" />
+              <mxPoint x="460" y="140" />
+              <mxPoint x="460" y="105" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- ===================== ACCELERATION CHART ===================== -->
+        <mxCell id="baseAcc" value="" style="endArrow=none;html=1;strokeColor=#C3C2B7;strokeWidth=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="120" y="270" as="sourcePoint" />
+            <mxPoint x="600" y="270" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="refCurAcc" value="" style="endArrow=none;dashed=1;html=1;strokeColor=#C3C2B7;strokeWidth=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="120" y="245" as="sourcePoint" />
+            <mxPoint x="600" y="245" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="refMaxDec" value="" style="endArrow=none;dashed=1;html=1;strokeColor=#C3C2B7;strokeWidth=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="120" y="355" as="sourcePoint" />
+            <mxPoint x="600" y="355" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tickCurAcc" value="cur_acc" style="text;html=1;align=right;verticalAlign=middle;fontSize=10;fontColor=#898781;" vertex="1" parent="1">
+          <mxGeometry x="30" y="237" width="85" height="16" as="geometry" />
+        </mxCell>
+        <mxCell id="tickZeroAcc" value="0" style="text;html=1;align=right;verticalAlign=middle;fontSize=10;fontColor=#898781;" vertex="1" parent="1">
+          <mxGeometry x="55" y="262" width="60" height="16" as="geometry" />
+        </mxCell>
+        <mxCell id="tickMaxDec" value="-max_dec" style="text;html=1;align=right;verticalAlign=middle;fontSize=10;fontColor=#898781;" vertex="1" parent="1">
+          <mxGeometry x="30" y="347" width="85" height="16" as="geometry" />
+        </mxCell>
+        <mxCell id="curveAcc" value="" style="endArrow=none;html=1;rounded=0;strokeWidth=2.5;strokeColor=#2A78D6;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="120" y="245" as="sourcePoint" />
+            <mxPoint x="580" y="270" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="340" y="355" />
+              <mxPoint x="460" y="355" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- ===================== VELOCITY CHART ===================== -->
+        <mxCell id="baseVel" value="" style="endArrow=none;html=1;strokeColor=#C3C2B7;strokeWidth=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="120" y="550" as="sourcePoint" />
+            <mxPoint x="600" y="550" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="refCurVel" value="" style="endArrow=none;dashed=1;html=1;strokeColor=#C3C2B7;strokeWidth=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="120" y="470" as="sourcePoint" />
+            <mxPoint x="600" y="470" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tickCurVel" value="cur_vel" style="text;html=1;align=right;verticalAlign=middle;fontSize=10;fontColor=#898781;" vertex="1" parent="1">
+          <mxGeometry x="30" y="462" width="85" height="16" as="geometry" />
+        </mxCell>
+        <mxCell id="tickZeroVel" value="0" style="text;html=1;align=right;verticalAlign=middle;fontSize=10;fontColor=#898781;" vertex="1" parent="1">
+          <mxGeometry x="55" y="542" width="60" height="16" as="geometry" />
+        </mxCell>
+        <mxCell id="curveVel" value="" style="endArrow=none;html=1;rounded=0;strokeWidth=2.5;strokeColor=#2A78D6;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="120" y="470" as="sourcePoint" />
+            <mxPoint x="580" y="550" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="170" y="455" />
+              <mxPoint x="340" y="500" />
+              <mxPoint x="460" y="540" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="noteVelPeak" value="yerel tepe hız&#10;(a&gt;0 iken v artar)" style="text;html=1;align=left;verticalAlign=middle;fontSize=9;fontStyle=2;fontColor=#898781;" vertex="1" parent="1">
+          <mxGeometry x="178" y="415" width="140" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- ===================== POSITION CHART ===================== -->
+        <mxCell id="basePos" value="" style="endArrow=none;html=1;strokeColor=#C3C2B7;strokeWidth=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="120" y="730" as="sourcePoint" />
+            <mxPoint x="600" y="730" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="refBrakeDist" value="" style="endArrow=none;dashed=1;html=1;strokeColor=#C3C2B7;strokeWidth=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="120" y="595" as="sourcePoint" />
+            <mxPoint x="600" y="595" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tickZeroPos" value="0" style="text;html=1;align=right;verticalAlign=middle;fontSize=10;fontColor=#898781;" vertex="1" parent="1">
+          <mxGeometry x="55" y="722" width="60" height="16" as="geometry" />
+        </mxCell>
+        <mxCell id="tickBrakeDist" value="brake_distance" style="text;html=1;align=right;verticalAlign=middle;fontSize=10;fontColor=#898781;" vertex="1" parent="1">
+          <mxGeometry x="10" y="587" width="105" height="16" as="geometry" />
+        </mxCell>
+        <mxCell id="curvePos" value="" style="endArrow=none;html=1;rounded=0;strokeWidth=2.5;strokeColor=#2A78D6;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="120" y="728" as="sourcePoint" />
+            <mxPoint x="580" y="595" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="220" y="690" />
+              <mxPoint x="340" y="635" />
+              <mxPoint x="460" y="605" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- ===================== PHASE DIVIDERS (t1+t2 sonu, t3 sonu) ===================== -->
+        <mxCell id="divMinorAccZero" value="" style="endArrow=none;dashed=1;html=1;strokeColor=#C3C2B7;strokeWidth=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="170" y="85" as="sourcePoint" />
+            <mxPoint x="170" y="375" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="noteAccZero" value="ivme=0 (Faz1&#8594;Faz2, ayni -J ile devam eder)" style="text;html=1;align=left;verticalAlign=middle;fontSize=8;fontStyle=2;fontColor=#898781;" vertex="1" parent="1">
+          <mxGeometry x="176" y="200" width="160" height="26" as="geometry" />
+        </mxCell>
+
+        <mxCell id="divB" value="" style="endArrow=none;dashed=1;html=1;strokeColor=#52514E;strokeWidth=1.5;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="340" y="85" as="sourcePoint" />
+            <mxPoint x="340" y="745" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="divC" value="" style="endArrow=none;dashed=1;html=1;strokeColor=#52514E;strokeWidth=1.5;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="460" y="85" as="sourcePoint" />
+            <mxPoint x="460" y="745" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- ===================== TIME AXIS ===================== -->
+        <mxCell id="timeAxis" value="" style="endArrow=classic;html=1;strokeColor=#52514E;strokeWidth=1.5;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="110" y="752" as="sourcePoint" />
+            <mxPoint x="615" y="752" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="timeAxisLabel" value="t" style="text;html=1;align=left;verticalAlign=middle;fontSize=12;fontStyle=2;fontColor=#52514E;" vertex="1" parent="1">
+          <mxGeometry x="620" y="744" width="20" height="16" as="geometry" />
+        </mxCell>
+
+        <mxCell id="tick0" value="" style="endArrow=none;html=1;strokeColor=#52514E;strokeWidth=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="120" y="748" as="sourcePoint" />
+            <mxPoint x="120" y="756" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tickB" value="" style="endArrow=none;html=1;strokeColor=#52514E;strokeWidth=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="340" y="748" as="sourcePoint" />
+            <mxPoint x="340" y="756" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tickC" value="" style="endArrow=none;html=1;strokeColor=#52514E;strokeWidth=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="460" y="748" as="sourcePoint" />
+            <mxPoint x="460" y="756" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tickD" value="" style="endArrow=none;html=1;strokeColor=#52514E;strokeWidth=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="580" y="748" as="sourcePoint" />
+            <mxPoint x="580" y="756" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="tickLbl0" value="0" style="text;html=1;align=center;verticalAlign=middle;fontSize=10;fontColor=#52514E;" vertex="1" parent="1">
+          <mxGeometry x="100" y="757" width="40" height="14" as="geometry" />
+        </mxCell>
+        <mxCell id="tickLblB" value="t1+t2" style="text;html=1;align=center;verticalAlign=middle;fontSize=10;fontColor=#52514E;" vertex="1" parent="1">
+          <mxGeometry x="310" y="757" width="60" height="14" as="geometry" />
+        </mxCell>
+        <mxCell id="tickLblC" value="+t3" style="text;html=1;align=center;verticalAlign=middle;fontSize=10;fontColor=#52514E;" vertex="1" parent="1">
+          <mxGeometry x="430" y="757" width="60" height="14" as="geometry" />
+        </mxCell>
+        <mxCell id="tickLblD" value="+t4 (durdu)" style="text;html=1;align=center;verticalAlign=middle;fontSize=10;fontColor=#52514E;" vertex="1" parent="1">
+          <mxGeometry x="545" y="757" width="70" height="14" as="geometry" />
+        </mxCell>
+
+        <!-- ===================== PHASE LABEL BOXES ===================== -->
+        <mxCell id="phaseBox1" value="Faz 1+2&#10;İvme: cur_acc &#8594; 0 &#8594; -max_dec&#10;(jerk = -J, sürekli tek rampa)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FCFCFB;strokeColor=#C3C2B7;fontSize=10;fontColor=#52514E;align=center;" vertex="1" parent="1">
+          <mxGeometry x="122" y="778" width="216" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="phaseBox2" value="Faz 3&#10;Plato: ivme = -max_dec sabit&#10;(jerk = 0)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FCFCFB;strokeColor=#C3C2B7;fontSize=10;fontColor=#52514E;align=center;" vertex="1" parent="1">
+          <mxGeometry x="342" y="778" width="116" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="phaseBox3" value="Faz 4&#10;İvme: -max_dec &#8594; 0 (jerk = +J)&#10;v tam sıfıra iner" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FCFCFB;strokeColor=#C3C2B7;fontSize=10;fontColor=#52514E;align=center;" vertex="1" parent="1">
+          <mxGeometry x="462" y="778" width="120" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- ===================== NOTE ===================== -->
+        <mxCell id="note" value="Not: Eğriler ölçekli değildir, faz geçişlerini kavramsal olarak gösterir. cur_acc &gt; 0 senaryosu için çizildi (bkz. GenerateTrajectory / brake_distance, TrajectoryGenerator.cpp). Faz 1 ve Faz 2 kodda ayrı hesaplanır ama fizikte tek bir sürekli -J rampasıdır; Faz 3 plato gerekmeyen küçük hız durumunda atlanıp doğrudan simetrik üçgen (2 fazlı) profile düşülür." style="text;html=1;align=left;verticalAlign=top;fontSize=9;fontStyle=2;fontColor=#898781;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="122" y="838" width="480" height="45" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
