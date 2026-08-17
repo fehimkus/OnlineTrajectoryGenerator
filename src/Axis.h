@@ -5,6 +5,7 @@ enum class AxisState
     Idle,
     ContinuousMotion,
     DiscreteMotion,
+    Stopping,                        // jerk limited braking down to standstill
 };
 
 struct Axis
@@ -26,4 +27,7 @@ struct Axis
     double CurrentPosition = 0.0;
     double CurrentVelocity = 0.0;
     double CurrentAcceleration = 0.0;
+
+    // Trajectory generator output
+    double BrakeDistance = 0.0;      // distance needed to stop from the current state (mm)
 };

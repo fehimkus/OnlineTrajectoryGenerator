@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Qt6 REQUIRED COMPONENTS Widgets Charts)
 qt_standard_project_setup()
 
-qt_add_executable(UltimateMotion
+qt_add_executable(braketest
     src/main.cpp
     src/Axis.h
     src/TrajectoryGenerator.h
@@ -16,4 +16,4 @@ qt_add_executable(UltimateMotion
     src/MainWindow.cpp
 )
 
-target_link_libraries(UltimateMotion PRIVATE Qt6::Widgets Qt6::Charts)
+target_link_libraries(braketest PRIVATE Qt6::Widgets Qt6::Charts)

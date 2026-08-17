@@ -67,3 +67,9 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+motionold.cpp
+sample.cpp
+
+# brake test output
+braketest_log.csv

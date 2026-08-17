@@ -8,7 +8,11 @@
 #include <QtCharts/QValueAxis>
 
 #include <QCheckBox>
+#include <QDateTime>
+#include <QDir>
 #include <QDoubleSpinBox>
+#include <QFile>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -16,6 +20,7 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QRandomGenerator>
+#include <QTextStream>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -26,15 +31,18 @@
 namespace
 {
 // Simulation timing
-constexpr double SIM_DT = 0.001;      // 1 ms substep
-constexpr int SUBSTEPS = 20;          // 20 substeps per 20 ms UI tick
 constexpr int TICK_MS = 20;
-constexpr double WINDOW_SEC = 10.0;   // sliding time window
+constexpr double TICK_SEC = 0.020;    // simulated seconds per UI tick
+constexpr double CHART_DT = 0.0005;   // one chart sample per half millisecond
+constexpr double TAIL_SEC = 0.15;     // keep drawing this long after standstill
+
+const QString LOG_FILE = QStringLiteral("braketest_log.csv");
 
 // Colors (validated palette)
 const QColor COL_SURFACE("#fcfcfb");
 const QColor COL_ACTUAL("#2a78d6");   // actual value - blue
 const QColor COL_LIMIT("#898781");    // limit - gray, dashed
+const QColor COL_TARGET("#c8622a");   // predicted stop point - orange, dashed
 const QColor COL_GRID("#e1e0d9");
 const QColor COL_AXIS_LABEL("#898781");
 const QColor COL_TITLE("#52514e");
@@ -44,26 +52,25 @@ const QColor COL_BASELINE("#c3c2b7");
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
 {
-    setWindowTitle(tr("UltimateMotion — Eksen Simülatörü"));
+    setWindowTitle(tr("Fren Mesafesi Testi"));
 
-    m_posPane  = makePane(tr("Konum (mm)"),      tr("Limit"), 2, COL_LIMIT, 1.0);
-    m_velPane  = makePane(tr("Hız (mm/s)"),      tr("Limit"), 2, COL_LIMIT, 1.0);
-    m_accPane  = makePane(tr("İvme (mm/s²)"),    tr("Limit"), 2, COL_LIMIT, 1.0);
-    m_jerkPane = makePane(tr("Jerk (mm/s³)"),    tr("Limit"), 2, COL_LIMIT, 1.0);
+    m_posPane = makePane(tr("Konum (mm)"),   tr("Tahmini duruş"), 1, COL_TARGET, 1.5);
+    m_velPane = makePane(tr("Hız (mm/s)"),   tr("Sıfır"),         1, COL_LIMIT, 1.0);
+    m_accPane = makePane(tr("İvme (mm/s²)"), tr("Yavaşlama limiti"), 2, COL_LIMIT, 1.0);
 
-    auto* chartGrid = new QGridLayout;
-    const ChartPane* panes[4] = { &m_posPane, &m_velPane, &m_accPane, &m_jerkPane };
-    for (int i = 0; i < 4; ++i)
+    auto* chartLay = new QVBoxLayout;
+    const ChartPane* panes[3] = { &m_posPane, &m_velPane, &m_accPane };
+    for (const ChartPane* p : panes)
     {
-        auto* view = new QChartView(panes[i]->chart);
+        auto* view = new QChartView(p->chart);
         view->setRenderHint(QPainter::Antialiasing);
-        chartGrid->addWidget(view, i / 2, i % 2);
+        chartLay->addWidget(view);
     }
 
     auto* central = new QWidget;
     auto* rootLay = new QHBoxLayout(central);
     rootLay->addWidget(buildControlPanel());
-    rootLay->addLayout(chartGrid, /*stretch*/ 1);
+    rootLay->addLayout(chartLay, /*stretch*/ 1);
     setCentralWidget(central);
 
     applyParams();
@@ -144,7 +151,7 @@ MainWindow::ChartPane MainWindow::makePane(const QString& title, const QString& 
 QWidget* MainWindow::buildControlPanel()
 {
     auto* panel = new QWidget;
-    panel->setMaximumWidth(340);
+    panel->setMaximumWidth(360);
     auto* lay = new QVBoxLayout(panel);
 
     auto makeSpin = [](double min, double max, double value, double step,
@@ -158,62 +165,60 @@ QWidget* MainWindow::buildControlPanel()
         return sp;
     };
 
-    // --- Target values ---
-    auto* grpTarget = new QGroupBox(tr("Hedef Değerler"));
-    auto* form = new QFormLayout(grpTarget);
-    m_spMaxVel    = makeSpin(-100000, 100000, m_axis.MaxVelocity, 10, " mm/s");
-    m_spMaxAcc    = makeSpin(1, 1000000, m_axis.MaxAcceleration, 50, " mm/s²");
-    m_spMaxDec    = makeSpin(1, 1000000, m_axis.MaxDeceleration, 50, " mm/s²");
-    m_spJerk      = makeSpin(1, 10000000, m_axis.Jerk, 500, " mm/s³", 0);
-    form->addRow(tr("Hedef hız"), m_spMaxVel);
-    form->addRow(tr("Maks. ivme"), m_spMaxAcc);
+    // --- Limits braking actually uses ---
+    auto* grpLimits = new QGroupBox(tr("Limitler"));
+    auto* form = new QFormLayout(grpLimits);
+    m_spMaxDec = makeSpin(1, 1000000, m_axis.MaxDeceleration, 50, " mm/s²");
+    m_spJerk   = makeSpin(1, 10000000, m_axis.Jerk, 500, " mm/s³", 0);
+    m_spScan   = makeSpin(0.01, 10.0, 1.0, 0.1, " ms", 2);
     form->addRow(tr("Maks. yavaşlama"), m_spMaxDec);
     form->addRow(tr("Jerk"), m_spJerk);
-    lay->addWidget(grpTarget);
+    form->addRow(tr("Tarama periyodu"), m_spScan);
+    lay->addWidget(grpLimits);
 
-    for (QDoubleSpinBox* sp : { m_spMaxVel, m_spMaxAcc, m_spMaxDec, m_spJerk })
+    for (QDoubleSpinBox* sp : { m_spMaxDec, m_spJerk, m_spScan })
         connect(sp, &QDoubleSpinBox::valueChanged, this, &MainWindow::applyParams);
 
-    // --- Random ranges ---
-    auto* grpRng = new QGroupBox(tr("Rastgele Aralıkları"));
+    // --- Random start state ---
+    auto* grpRng = new QGroupBox(tr("Rastgele Başlangıç Durumu"));
     auto* grid = new QGridLayout(grpRng);
     grid->addWidget(new QLabel(tr("Min")), 0, 1);
     grid->addWidget(new QLabel(tr("Maks")), 0, 2);
-    const QString rowNames[4] = { tr("Hız"), tr("İvme"),
-                                  tr("Yavaşlama"), tr("Jerk") };
-    const double defaults[4][2] = {
-        { -200.0, 200.0 },   // target velocity (mm/s, signed)
-        { 100.0, 2000.0 },   // acceleration (mm/s²)
-        { 100.0, 2000.0 },   // deceleration (mm/s²)
-        { 500.0, 20000.0 },  // jerk (mm/s³)
+    const QString rowNames[2] = { tr("Hız"), tr("İvme") };
+    const double defaults[2][2] = {
+        { -200.0, 200.0 },     // starting velocity (mm/s, signed)
+        { -2000.0, 2000.0 },   // starting acceleration (mm/s², signed)
     };
-    for (int i = 0; i < 4; ++i)
+    for (int i = 0; i < 2; ++i)
     {
         grid->addWidget(new QLabel(rowNames[i]), i + 1, 0);
-        const bool positiveOnly = (i >= 1); // everything except velocity is positive
-        const double lo = positiveOnly ? 1.0 : -1000000.0;
         for (int j = 0; j < 2; ++j)
         {
-            m_rng[i][j] = makeSpin(lo, 10000000, defaults[i][j], 10, QString(), 0);
+            m_rng[i][j] = makeSpin(-1000000, 1000000, defaults[i][j], 10, QString(), 0);
             grid->addWidget(m_rng[i][j], i + 1, j + 1);
         }
     }
-    auto* btnRandom = new QPushButton(tr("🎲 Rastgele Değer Ata"));
+    auto* btnRandom = new QPushButton(tr("Rastgele Fren Testi"));
     connect(btnRandom, &QPushButton::clicked, this, &MainWindow::onRandomize);
-    grid->addWidget(btnRandom, 5, 0, 1, 3);
+    grid->addWidget(btnRandom, 3, 0, 1, 3);
 
-    // Automatic trigger: randomizes itself at random intervals
-    m_chkAuto = new QCheckBox(tr("🔁 Otomatik tetikle"));
-    grid->addWidget(m_chkAuto, 6, 0);
+    // Automatic trigger: fires a new test once the axis has come to a stop
+    m_chkAuto = new QCheckBox(tr("Otomatik tekrarla"));
+    grid->addWidget(m_chkAuto, 4, 0);
     m_spAutoMin = makeSpin(0.1, 3600, 1.0, 0.5, " s");
-    m_spAutoMax = makeSpin(0.1, 3600, 5.0, 0.5, " s");
-    grid->addWidget(m_spAutoMin, 6, 1);
-    grid->addWidget(m_spAutoMax, 6, 2);
+    m_spAutoMax = makeSpin(0.1, 3600, 3.0, 0.5, " s");
+    grid->addWidget(m_spAutoMin, 4, 1);
+    grid->addWidget(m_spAutoMax, 4, 2);
     lay->addWidget(grpRng);
 
     m_autoTimer = new QTimer(this);
     m_autoTimer->setSingleShot(true);
     connect(m_autoTimer, &QTimer::timeout, this, [this] {
+        if (m_axis.CurrentState == AxisState::Stopping)
+        {
+            scheduleNextAutoRandom();   // still braking, let it finish first
+            return;
+        }
         onRandomize();
         scheduleNextAutoRandom();
     });
@@ -229,84 +234,237 @@ QWidget* MainWindow::buildControlPanel()
         }
     });
 
-    // --- Live values ---
-    auto* grpLive = new QGroupBox(tr("Anlık Değerler"));
-    auto* liveForm = new QFormLayout(grpLive);
-    auto makeValueLabel = [] {
-        auto* lbl = new QLabel("0.00");
+    // --- Brake test read-out ---
+    auto* grpTest = new QGroupBox(tr("Fren Testi"));
+    auto* testForm = new QFormLayout(grpTest);
+    auto makeValueLabel = [](bool big) {
+        auto* lbl = new QLabel("-");
         QFont f = lbl->font();
         f.setBold(true);
-        f.setPointSize(f.pointSize() + 2);
+        if (big)
+            f.setPointSize(f.pointSize() + 2);
         lbl->setFont(f);
         lbl->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
         return lbl;
     };
-    m_lblState = new QLabel(tr("Boşta"));
-    m_lblState->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    m_lblPos = makeValueLabel();
-    m_lblVel = makeValueLabel();
-    m_lblAcc = makeValueLabel();
-    m_lblJerk = makeValueLabel();
-    liveForm->addRow(tr("Durum"), m_lblState);
-    liveForm->addRow(tr("Konum (mm)"), m_lblPos);
-    liveForm->addRow(tr("Hız (mm/s)"), m_lblVel);
-    liveForm->addRow(tr("İvme (mm/s²)"), m_lblAcc);
-    liveForm->addRow(tr("Jerk (mm/s³)"), m_lblJerk);
-    lay->addWidget(grpLive);
+    m_lblBranch      = makeValueLabel(false);
+    m_lblStart       = makeValueLabel(false);
+    m_lblHeld        = makeValueLabel(true);
+    m_lblMeasured    = makeValueLabel(true);
+    m_lblError       = makeValueLabel(true);
+    m_lblStopTime    = makeValueLabel(false);
+    m_lblLiveBrake   = makeValueLabel(false);
+    m_lblConsistency = makeValueLabel(false);
+    testForm->addRow(tr("Seçilen dal"), m_lblBranch);
+    testForm->addRow(tr("Başlangıç v / a"), m_lblStart);
+    testForm->addRow(tr("Hesaplanan mesafe"), m_lblHeld);
+    testForm->addRow(tr("Gerçekleşen mesafe"), m_lblMeasured);
+    testForm->addRow(tr("Hata"), m_lblError);
+    testForm->addRow(tr("Duruş süresi"), m_lblStopTime);
+    testForm->addRow(tr("Canlı fren mesafesi"), m_lblLiveBrake);
+    testForm->addRow(tr("Alınan + canlı - tutulan"), m_lblConsistency);
+    lay->addWidget(grpTest);
 
-    // --- Control buttons ---
-    auto* btnLay = new QHBoxLayout;
-    m_btnStartPause = new QPushButton(tr("Duraklat"));
-    connect(m_btnStartPause, &QPushButton::clicked, this, &MainWindow::onStartPause);
-    auto* btnReset = new QPushButton(tr("Sıfırla"));
-    connect(btnReset, &QPushButton::clicked, this, &MainWindow::onReset);
-    btnLay->addWidget(m_btnStartPause);
-    btnLay->addWidget(btnReset);
-    lay->addLayout(btnLay);
+    // --- Log ---
+    auto* btnLog = new QPushButton(tr("Log Al"));
+    connect(btnLog, &QPushButton::clicked, this, &MainWindow::onLog);
+    lay->addWidget(btnLog);
+
+    m_lblLog = new QLabel(tr("henüz log alınmadı"));
+    m_lblLog->setWordWrap(true);
+    m_lblLog->setStyleSheet("color:#898781;");
+    lay->addWidget(m_lblLog);
 
     lay->addStretch();
     return panel;
 }
 
-void MainWindow::onTick()
+void MainWindow::startBrakeTest()
 {
-    const double accBefore = m_axis.CurrentAcceleration;
-    for (int i = 0; i < SUBSTEPS; ++i)
-        GenerateTrajectory(m_axis, SIM_DT);
-    m_time += SUBSTEPS * SIM_DT;
+    // fresh trace for every test
+    m_time = 0.0;
+    for (ChartPane* p : { &m_posPane, &m_velPane, &m_accPane })
+        p->buffer.clear();
 
-    // average jerk applied over the tick
-    const double jerkVal =
-        (m_axis.CurrentAcceleration - accBefore) / (SUBSTEPS * SIM_DT);
+    // random state to brake from
+    m_axis.CurrentPosition = 0.0;
+    m_axis.CurrentVelocity = randIn(m_rng[0][0]->value(), m_rng[0][1]->value());
+    m_axis.CurrentAcceleration = randIn(m_rng[1][0]->value(), m_rng[1][1]->value());
 
-    updatePane(m_posPane, m_axis.CurrentPosition,
-               m_axis.PositiveLimit, m_axis.NegativeLimit, true);
-    updatePane(m_velPane, m_axis.CurrentVelocity,
-               m_axis.MaxVelocity, -m_axis.MaxVelocity, true);
-    updatePane(m_accPane, m_axis.CurrentAcceleration,
-               m_axis.MaxAcceleration, -m_axis.MaxDeceleration, true);
-    updatePane(m_jerkPane, jerkVal,
-               m_axis.Jerk, -m_axis.Jerk, true);
+    m_startVel = m_axis.CurrentVelocity;
+    m_startAcc = m_axis.CurrentAcceleration;
+    m_startPos = m_axis.CurrentPosition;
+    m_startTime = m_time;
+    m_startDir = (m_startVel < 0.0) ? -1.0 : 1.0;
 
-    m_lblState->setText(m_axis.CurrentState == AxisState::ContinuousMotion
-                            ? tr("Sürüş")
-                            : tr("Boşta"));
+    // which branch of the decision tree this state lands in
+    const double product = m_startAcc * m_startVel;
+    if (product > TOLERANCE)
+        m_branchName = tr("Hızlanıyor (a·v > 0)");
+    else if (product < -TOLERANCE)
+        m_branchName = tr("Yavaşlıyor (a·v < 0)");
+    else
+        m_branchName = tr("v veya a sıfır");
 
-    m_lblPos->setText(QString::number(m_axis.CurrentPosition, 'f', 2));
-    m_lblVel->setText(QString::number(m_axis.CurrentVelocity, 'f', 2));
-    m_lblAcc->setText(QString::number(m_axis.CurrentAcceleration, 'f', 2));
-    m_lblJerk->setText(QString::number(jerkVal, 'f', 0));
+    // brake distance is computed every scan, but we freeze the one from the instant
+    // braking starts and compare the real motion against it
+    GenerateTrajectory(m_axis, m_dt);
+    m_heldBrake = m_axis.BrakeDistance;
+
+    m_measuredDist = 0.0;
+    m_measuredTime = 0.0;
+    m_stopPos = 0.0;
+    m_lastScanVel = 0.0;
+    m_lastScanAcc = 0.0;
+    m_tailTime = 0.0;
+    m_chartAccum = 0.0;
+    m_testDone = false;
+
+    m_axis.CurrentState = AxisState::Stopping;
+
+    pushSample(m_posPane, m_time, m_axis.CurrentPosition);
+    pushSample(m_velPane, m_time, m_axis.CurrentVelocity);
+    pushSample(m_accPane, m_time, m_axis.CurrentAcceleration);
 }
 
-void MainWindow::updatePane(ChartPane& p, double newValue,
-                            double refVal1, double refVal2, bool hasRef2)
+void MainWindow::onTick()
 {
-    p.buffer.emplace_back(m_time, newValue);
-    while (!p.buffer.empty() && p.buffer.front().x() < m_time - WINDOW_SEC)
-        p.buffer.pop_front();
+    const int substeps = std::max(1, static_cast<int>(std::lround(TICK_SEC / m_dt)));
 
-    const double x0 = std::max(0.0, m_time - WINDOW_SEC);
-    const double x1 = std::max(m_time, WINDOW_SEC);
+    for (int i = 0; i < substeps; ++i)
+    {
+        const bool braking = (m_axis.CurrentState == AxisState::Stopping);
+
+        if (!braking && m_tailTime <= 0.0)
+            break;      // nothing is moving, freeze the trace where it ended
+
+        // state going into this scan, kept for the log if this is the one that stops
+        const double scanVel = m_axis.CurrentVelocity;
+        const double scanAcc = m_axis.CurrentAcceleration;
+
+        GenerateTrajectory(m_axis, m_dt);       // one scan: brake distance then the motion
+        m_time += m_dt;
+
+        bool stoppedNow = false;
+        if (braking && m_axis.CurrentState == AxisState::Idle)
+        {
+            // the axis came to a stop inside this scan
+            m_stopPos = m_axis.CurrentPosition;
+            m_measuredDist = std::abs(m_axis.CurrentPosition - m_startPos);
+            m_measuredTime = m_time - m_startTime;
+            m_lastScanVel = scanVel;
+            m_lastScanAcc = scanAcc;
+            m_tailTime = TAIL_SEC;
+            m_testDone = true;
+            stoppedNow = true;
+        }
+        else if (!braking)
+        {
+            m_tailTime -= m_dt;
+        }
+
+        m_chartAccum += m_dt;
+        if (m_chartAccum >= CHART_DT || stoppedNow)
+        {
+            m_chartAccum = 0.0;
+            pushSample(m_posPane, m_time, m_axis.CurrentPosition);
+            pushSample(m_velPane, m_time, m_axis.CurrentVelocity);
+            pushSample(m_accPane, m_time, m_axis.CurrentAcceleration);
+        }
+    }
+
+    refreshPane(m_posPane, m_startPos + (m_startDir * m_heldBrake), 0.0, false);
+    refreshPane(m_velPane, 0.0, 0.0, false);
+    refreshPane(m_accPane, m_axis.MaxDeceleration, -m_axis.MaxDeceleration, true);
+
+    updateLabels();
+}
+
+void MainWindow::updateLabels()
+{
+    const bool braking = (m_axis.CurrentState == AxisState::Stopping);
+
+    m_lblBranch->setText(m_branchName.isEmpty() ? QString("-") : m_branchName);
+    if (!m_branchName.isEmpty())
+    {
+        m_lblStart->setText(QString("%1 / %2")
+                                .arg(m_startVel, 0, 'f', 2)
+                                .arg(m_startAcc, 0, 'f', 0));
+        m_lblHeld->setText(QString::number(m_heldBrake, 'f', 4));
+    }
+
+    const double travelled = std::abs(m_axis.CurrentPosition - m_startPos);
+    const double live = m_axis.BrakeDistance;
+    m_lblLiveBrake->setText(braking ? QString::number(live, 'f', 4) : QString("0.0000"));
+
+    // while braking this has to stay on zero: what is left plus what is done equals the held value
+    if (!m_branchName.isEmpty())
+        m_lblConsistency->setText(QString::number(travelled + live - m_heldBrake, 'f', 4));
+
+    if (m_testDone)
+    {
+        m_lblMeasured->setText(QString::number(m_measuredDist, 'f', 4));
+        m_lblError->setText(QString("%1 mm").arg(m_measuredDist - m_heldBrake, 0, 'f', 4));
+        m_lblStopTime->setText(QString("%1 s").arg(m_measuredTime, 0, 'f', 4));
+    }
+    else if (braking)
+    {
+        m_lblMeasured->setText(QString::number(travelled, 'f', 4));
+        m_lblError->setText(tr("..."));
+        m_lblStopTime->setText(QString("%1 s").arg(m_time - m_startTime, 0, 'f', 4));
+    }
+}
+
+void MainWindow::onLog()
+{
+    if (!m_testDone)
+    {
+        m_lblLog->setText(tr("önce bir testin bitmesini bekle"));
+        return;
+    }
+
+    QFile file(LOG_FILE);
+    const bool fresh = !file.exists();
+
+    if (!file.open(QIODevice::Append | QIODevice::Text))
+    {
+        m_lblLog->setText(tr("log yazılamadı: %1").arg(QFileInfo(file).absoluteFilePath()));
+        return;
+    }
+
+    QTextStream out(&file);
+    if (fresh)
+    {
+        out << "time,start_vel,start_acc,start_pos,max_dec,jerk,scan_ms,branch,"
+               "held_brake,measured_dist,error,stop_time,stop_pos,"
+               "vel_before_last_scan,acc_before_last_scan\n";
+    }
+
+    auto num = [](double v) { return QString::number(v, 'g', 12); };
+
+    out << QDateTime::currentDateTime().toString(Qt::ISODate) << ','
+        << num(m_startVel) << ',' << num(m_startAcc) << ',' << num(m_startPos) << ','
+        << num(m_axis.MaxDeceleration) << ',' << num(m_axis.Jerk) << ','
+        << num(m_dt * 1000.0) << ',' << '"' << m_branchName << '"' << ','
+        << num(m_heldBrake) << ',' << num(m_measuredDist) << ','
+        << num(m_measuredDist - m_heldBrake) << ',' << num(m_measuredTime) << ','
+        << num(m_stopPos) << ','
+        << num(m_lastScanVel) << ',' << num(m_lastScanAcc) << '\n';
+
+    file.close();
+
+    m_lblLog->setText(tr("kaydedildi → %1").arg(QFileInfo(file).absoluteFilePath()));
+}
+
+void MainWindow::pushSample(ChartPane& p, double t, double value)
+{
+    p.buffer.emplace_back(t, value);
+}
+
+void MainWindow::refreshPane(ChartPane& p, double refVal1, double refVal2, bool hasRef2)
+{
+    const double x0 = 0.0;
+    const double x1 = std::max(m_time, 0.1);
     p.axX->setRange(x0, x1);
 
     double lo = std::numeric_limits<double>::max();
@@ -315,6 +473,11 @@ void MainWindow::updatePane(ChartPane& p, double newValue,
     {
         lo = std::min(lo, pt.y());
         hi = std::max(hi, pt.y());
+    }
+    if (p.buffer.empty())
+    {
+        lo = 0.0;
+        hi = 0.0;
     }
     lo = std::min(lo, refVal1);
     hi = std::max(hi, refVal1);
@@ -344,16 +507,8 @@ double MainWindow::randIn(double a, double b)
 
 void MainWindow::onRandomize()
 {
-    const QSignalBlocker b1(m_spMaxVel), b2(m_spMaxAcc), b3(m_spMaxDec),
-        b4(m_spJerk);
-    m_spMaxVel->setValue(randIn(m_rng[0][0]->value(), m_rng[0][1]->value()));
-    m_spMaxAcc->setValue(randIn(m_rng[1][0]->value(), m_rng[1][1]->value()));
-    m_spMaxDec->setValue(randIn(m_rng[2][0]->value(), m_rng[2][1]->value()));
-    m_spJerk->setValue(randIn(m_rng[3][0]->value(), m_rng[3][1]->value()));
-
-    // start driving to a random target velocity
     applyParams();
-    m_axis.CurrentState = AxisState::ContinuousMotion;
+    startBrakeTest();
 }
 
 void MainWindow::scheduleNextAutoRandom()
@@ -362,39 +517,9 @@ void MainWindow::scheduleNextAutoRandom()
     m_autoTimer->start(static_cast<int>(sec * 1000.0));
 }
 
-void MainWindow::onReset()
-{
-    m_time = 0.0;
-    m_axis.CurrentPosition = 0.0;
-    m_axis.CurrentVelocity = 0.0;
-    m_axis.CurrentAcceleration = 0.0;
-    m_axis.CurrentState = AxisState::Idle;
-    for (ChartPane* p : { &m_posPane, &m_velPane, &m_accPane, &m_jerkPane })
-        p->buffer.clear();
-    applyParams();
-}
-
-void MainWindow::onStartPause()
-{
-    if (m_timer->isActive())
-    {
-        m_timer->stop();
-        m_autoTimer->stop();
-        m_btnStartPause->setText(tr("Başlat"));
-    }
-    else
-    {
-        m_timer->start();
-        if (m_chkAuto->isChecked())
-            scheduleNextAutoRandom();
-        m_btnStartPause->setText(tr("Duraklat"));
-    }
-}
-
 void MainWindow::applyParams()
 {
-    m_axis.MaxVelocity = m_spMaxVel->value();
-    m_axis.MaxAcceleration = m_spMaxAcc->value();
     m_axis.MaxDeceleration = m_spMaxDec->value();
     m_axis.Jerk = m_spJerk->value();
+    m_dt = m_spScan->value() / 1000.0;
 }
