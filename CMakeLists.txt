@@ -12,8 +12,21 @@ qt_add_executable(braketest
     src/Axis.h
     src/TrajectoryGenerator.h
     src/TrajectoryGenerator.cpp
+    src/Profilerold.h
+    src/Profilerold.cpp
     src/MainWindow.h
     src/MainWindow.cpp
 )
 
 target_link_libraries(braketest PRIVATE Qt6::Widgets Qt6::Charts)
+
+qt_add_executable(onlinetest
+    src/online_main.cpp
+    src/Axis.h
+    src/TrajectoryGenerator.h
+    src/TrajectoryGenerator.cpp
+    src/OnlineWindow.h
+    src/OnlineWindow.cpp
+)
+
+target_link_libraries(onlinetest PRIVATE Qt6::Widgets Qt6::Charts)
