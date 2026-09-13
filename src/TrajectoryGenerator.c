@@ -1,72 +1,97 @@
 #include "TrajectoryGenerator.h"
 
-#include <algorithm>
-#include <cmath>
+#include <math.h>
 
-// quadratic equation solver, returns true if a real root exists
-bool solveQuadratic(double a, double b, double c, double &x1, double &x2)
+// std::min / std::max, written out so the compiler emits a plain minsd / maxsd instead of libm's
+// NaN aware fmin / fmax. same result for every value that can reach them
+static inline double dmin(double a, double b)
+{
+    return (b < a) ? b : a;
+}
+
+static inline double dmax(double a, double b)
+{
+    return (a < b) ? b : a;
+}
+
+// zeroes the limits and puts back the two window defaults a C struct cannot carry on its own
+void MotionLimitsInit(MotionLimits *limits)
+{
+    limits->MaxVelocity = 0.0;
+    limits->MaxAcceleration = 0.0;
+    limits->MaxDeceleration = 0.0;
+    limits->Jerk = 0.0;
+    limits->NegativeLimit = 0.0;
+    limits->PositiveLimit = 0.0;
+    limits->InPositionWindow = 1e-4;
+    limits->InVelocityWindow = 1e-3;
+}
+
+// quadratic equation solver, returns non zero if a real root exists
+int solveQuadratic(double a, double b, double c, double *x1, double *x2)
 {
     double discriminant = b * b - 4 * a * c;    // is there a root
 
     if (discriminant < 0)
     {
-        return false;       // no real root
+        return 0;       // no real root
     }
 
-    double sqrt_discriminant = std::sqrt(discriminant);
+    double sqrt_discriminant = sqrt(discriminant);
     double denom = 2 * a;       // note: no a = 0 check
 
-    x1 = (-b + sqrt_discriminant) / denom;      // larger root
-    x2 = (-b - sqrt_discriminant) / denom;      // smaller root
+    *x1 = (-b + sqrt_discriminant) / denom;     // larger root
+    *x2 = (-b - sqrt_discriminant) / denom;     // smaller root
 
-    return true;
+    return 1;
 }
 
 // distance the axis covers if it starts braking right now, until standstill. magnitude, always
-// positive. only needs the state and the two limits the braking phases use
-double BrakeDistance(double cur_vel, double cur_acc, double max_dec, double jerk)
+// positive. only needs the state and the two limits the braking phases use. static so the scan can
+// inline it - the bisection below calls it once per step and it is the hot path of the whole core
+static double CalcBrakeDistance(double cur_vel, double cur_acc, double max_dec, double jerk)
 {
-    const double acc_abs = std::abs(cur_acc);
-    const double vel_abs = std::abs(cur_vel);
+    const double acc_abs = fabs(cur_acc);
+    const double vel_abs = fabs(cur_vel);
 
     double brake_distance = 0.0;        // distance i would cover if i braked right now
     double t1, t2, t3;          // phase durations
     double x1, x2, x3, x4;      // distance covered in each phase
     double v1, v2, v3;          // velocity at the end of each phase
     double signvelocity;        // jerk is applied opposite to the velocity
-    
+
     if (cur_acc * cur_vel > TOLERANCE)      // acceleration and velocity same direction ----- so we are speeding up
     {
         // first the speeding up has to be stopped, that is the acceleration has to be zeroed.
-        cur_vel < 0.0 ? signvelocity = 1 : signvelocity = -1;       // velocity direction matters for the jerk
+        signvelocity = (cur_vel < 0.0) ? 1 : -1;        // velocity direction matters for the jerk
         t1 = acc_abs / jerk;        // time it takes to zero the current acceleration
         x1 = (cur_vel * t1) + (0.5 * cur_acc * t1 * t1) + (signvelocity / 6.0) * jerk * t1 * t1 * t1;      //distance covered while the acceleration is zeroed
         v1 = cur_vel + (cur_acc * t1) + (0.5 * signvelocity * jerk * t1 * t1);      // velocity reached once the acceleration is zero
-        
-        const double x1_abs = std::abs(x1);     // the braking phases below run on magnitudes, same as the slowing down branch
-        const double v1_abs = std::abs(v1);
-        
+
+        const double x1_abs = fabs(x1);     // the braking phases below run on magnitudes, same as the slowing down branch
+        const double v1_abs = fabs(v1);
+
         if (v1_abs > ((max_dec * max_dec / jerk) + TOLERANCE))        // can the velocity reached at zero acceleration be killed without hitting max deceleration?
         {
             t2 = max_dec / jerk;        // time for acceleration 0 -> -max_dec
             x2 = (v1_abs * t2) - (0.1666667 * jerk * t2 * t2 * t2);     // distance covered in this phase
             v2 = v1_abs - (0.5 * jerk * t2 * t2);       // velocity left once we sit on max_dec
-            
+
             t3 = (v2 - (0.5 * max_dec * max_dec / jerk)) / max_dec;     // time spent at constant max_dec
             x3 = (v2 * t3) - (0.5 * max_dec * t3 * t3);     // distance covered at constant deceleration
             v3 = v2 - (max_dec * t3);       // velocity left for the final jerk phase
-            
+
             // Phase 4: acceleration -max_dec -> 0 (with jerk), velocity drops exactly to zero
             x4 = (0.1666667 * max_dec * t2 * t2);
-            
+
             brake_distance = x1_abs + x2 + x3 + x4;     // trapezoidal profile
         }
         else
         {
             // we never reach max_dec, triangular profile
-            t2 = std::sqrt(v1_abs / jerk);      // duration of each jerk half
+            t2 = sqrt(v1_abs / jerk);       // duration of each jerk half
             x2 = v1_abs * t2;       // total distance of both halves
-            
+
             brake_distance = x1_abs + x2;
         }
     }
@@ -103,7 +128,7 @@ double BrakeDistance(double cur_vel, double cur_acc, double max_dec, double jerk
                 else
                 {
                     // triangular, max_dec is never reached, the deceleration peaks below it
-                    double acc_peak = std::sqrt((jerk * vel_abs) + (0.5 * acc_abs * acc_abs));       // highest deceleration this profile reaches
+                    double acc_peak = sqrt((jerk * vel_abs) + (0.5 * acc_abs * acc_abs));       // highest deceleration this profile reaches
 
                     t1 = (acc_peak - acc_abs) / jerk;       // time to raise the deceleration up to the peak
                     x1 = (vel_abs * t1) - (0.5 * acc_abs * t1 * t1) - (0.1666667 * jerk * t1 * t1 * t1);     // distance covered while the deceleration is raised
@@ -149,11 +174,11 @@ double BrakeDistance(double cur_vel, double cur_acc, double max_dec, double jerk
         {
             // we are over braking, the velocity hits zero before the deceleration can be zeroed
             double t_root1, t_root2;        // 0 = vel_abs - acc_abs*t + 0.5*jerk*t^2
-            bool solved = solveQuadratic((0.5 * jerk), -acc_abs, vel_abs, t_root1, t_root2);
+            int solved = solveQuadratic((0.5 * jerk), -acc_abs, vel_abs, &t_root1, &t_root2);
 
             if (solved)
             {
-                t1 = std::min(t_root1, t_root2);        // the first time the velocity reaches zero
+                t1 = dmin(t_root1, t_root2);        // the first time the velocity reaches zero
             }
             else
             {
@@ -200,7 +225,7 @@ double BrakeDistance(double cur_vel, double cur_acc, double max_dec, double jerk
             else
             {
                 // we never reach max_dec, triangular profile
-                t1 = std::sqrt(vel_abs / jerk);     // duration of each jerk half
+                t1 = sqrt(vel_abs / jerk);      // duration of each jerk half
                 x1 = vel_abs * t1;      // total distance of both halves
 
                 brake_distance = x1;
@@ -230,7 +255,7 @@ double BrakeDistance(double cur_vel, double cur_acc, double max_dec, double jerk
             else
             {
                 // we never reach max_dec, triangular profile
-                t2 = std::sqrt(v1 / jerk);      // duration of each jerk half
+                t2 = sqrt(v1 / jerk);       // duration of each jerk half
                 x2 = v1 * t2;       // total distance of both halves
 
                 brake_distance = x1 + x2;
@@ -238,22 +263,34 @@ double BrakeDistance(double cur_vel, double cur_acc, double max_dec, double jerk
         }
     }
 
+    (void)v3;       // written by the trapezoidal branch, kept so the phase list stays complete
+
     return brake_distance;
+}
+
+// the external entry, everything inside this file calls the static one above
+double BrakeDistance(double cur_vel, double cur_acc, double max_dec, double jerk)
+{
+    return CalcBrakeDistance(cur_vel, cur_acc, max_dec, jerk);
 }
 
 // the scan both modes share. everything here works in the direction frame the caller picked, and
 // the sign is put back on the way out. vel_bound is what the settling velocity may not exceed in
 // that frame; diff_pos is the distance left to the target, or negative when there is no target
-static TrajectoryStep ScanStep(const MotionState& state, const MotionLimits& limits, double deltaTime,
+static TrajectoryStep ScanStep(const MotionState *state, const MotionLimits *limits, double deltaTime,
                                double dir, double vel_bound, double diff_pos,
                                double max_acc, double max_dec, double jerk)
 {
     TrajectoryStep step;
-    step.State = state;
+    step.State = *state;
+    step.Jerk = 0.0;
+    step.BrakeDistance = 0.0;
+    step.InPosition = 0;
+    step.InVelocity = 0;
 
-    const double cur_pos = state.Position;
-    const double vel_dir = state.Velocity * dir;        // velocity in the direction the scan is solved in
-    const double acc_dir = state.Acceleration * dir;
+    const double cur_pos = state->Position;
+    const double vel_dir = state->Velocity * dir;       // velocity in the direction the scan is solved in
+    const double acc_dir = state->Acceleration * dir;
 
     // every limit is a statement about the state the axis will be in at the END of this scan, not
     // the one it is in now. tested on the current state every switch lands a scan late, and what one
@@ -262,30 +299,41 @@ static TrajectoryStep ScanStep(const MotionState& state, const MotionLimits& lim
     // scan state still honours every limit
     const double acc_limit_up = (vel_dir < -TOLERANCE) ? max_dec : max_acc;     // an acceleration along the frame speeds the axis up unless it is still running the other way
     const double acc_limit_down = (vel_dir > TOLERANCE) ? max_dec : max_acc;    // one against it slows the axis down unless it is still running the other way
+    const double acc_floor = -acc_limit_down;
 
     // software limits are honoured by asking where the axis comes to rest, not where it is now
-    const bool limits_on = (limits.PositiveLimit > limits.NegativeLimit);
-    const double breach_now = std::max(0.0, std::max(limits.NegativeLimit - cur_pos, cur_pos - limits.PositiveLimit));      // how far outside it already is
+    const int limits_on = (limits->PositiveLimit > limits->NegativeLimit);
+    const double neg_limit = limits->NegativeLimit;
+    const double pos_limit = limits->PositiveLimit;
+    const double breach_now = limits_on ? dmax(0.0, dmax(neg_limit - cur_pos, cur_pos - pos_limit)) : 0.0;      // how far outside it already is
+
+    // loop invariants of the three polynomials below, hoisted without regrouping anything: the
+    // originals summed left to right, so splitting off the leading terms keeps every bit identical
+    const int has_target = (diff_pos >= 0.0);
+    const int needs_brake = (limits_on || has_target);       // otherwise the brake distance is never asked for
+    const double vel_base = vel_dir + (acc_dir * deltaTime);
+    const double pos_base = (vel_dir * deltaTime) + (0.5 * acc_dir * deltaTime * deltaTime);
+    const double two_jerk = 2.0 * jerk;
 
     double jerk_lo = -jerk;     // the fallback below covers the case where even this is not feasible
     double jerk_hi = jerk;
-    bool feasible = false;
+    int feasible = 0;
 
     for (int i = 0; i < BISECTION_STEPS; i++)
     {
         const double jerk_try = (0.5 * (jerk_lo + jerk_hi));
         const double acc_end = acc_dir + (jerk_try * deltaTime);
-        const double vel_end = vel_dir + (acc_dir * deltaTime) + (0.5 * jerk_try * deltaTime * deltaTime);
-        const double pos_end = (vel_dir * deltaTime) + (0.5 * acc_dir * deltaTime * deltaTime) + (0.1666667 * jerk_try * deltaTime * deltaTime * deltaTime);
+        const double vel_end = vel_base + (0.5 * jerk_try * deltaTime * deltaTime);
+        const double pos_end = pos_base + (0.1666667 * jerk_try * deltaTime * deltaTime * deltaTime);
 
-        bool ok = ((acc_end <= acc_limit_up) && (acc_end >= -acc_limit_down))
-                  && ((vel_end + ((acc_end * std::abs(acc_end)) / (2.0 * jerk))) <= vel_bound);      // where the velocity settles once that acceleration is nulled
+        int ok = ((acc_end <= acc_limit_up) && (acc_end >= acc_floor))
+                 && ((vel_end + ((acc_end * fabs(acc_end)) / two_jerk)) <= vel_bound);      // where the velocity settles once that acceleration is nulled
 
-        if (ok && (limits_on || (diff_pos >= 0.0)))
+        if (ok && needs_brake)
         {
-            const double brake_end = BrakeDistance(vel_end, acc_end, max_dec, jerk);
+            const double brake_end = CalcBrakeDistance(vel_end, acc_end, max_dec, jerk);
 
-            if (diff_pos >= 0.0)        // there is a target to stop on
+            if (has_target)     // there is a target to stop on
             {
                 const double diff_end = diff_pos - pos_end;     // distance still left to it after this scan
                 ok = ((diff_end >= 0.0) && (brake_end <= diff_end));
@@ -294,7 +342,7 @@ static TrajectoryStep ScanStep(const MotionState& state, const MotionLimits& lim
             if (ok && limits_on)        // where it would come to rest, signed and back in world coordinates
             {
                 const double stop_pos = cur_pos + (dir * (pos_end + ((vel_end < 0.0) ? -brake_end : brake_end)));
-                const double breach_end = std::max(0.0, std::max(limits.NegativeLimit - stop_pos, stop_pos - limits.PositiveLimit));
+                const double breach_end = dmax(0.0, dmax(neg_limit - stop_pos, stop_pos - pos_limit));
 
                 // inside the limits, or at least closer to them than it already is - the second half
                 // is what lets an axis that starts outside drive back in instead of being frozen
@@ -305,7 +353,7 @@ static TrajectoryStep ScanStep(const MotionState& state, const MotionLimits& lim
         if (ok)
         {
             jerk_lo = jerk_try;
-            feasible = true;
+            feasible = 1;
         }
         else
         {
@@ -320,7 +368,7 @@ static TrajectoryStep ScanStep(const MotionState& state, const MotionLimits& lim
 
     if (!feasible)      // nothing this scan can do keeps the axis inside every limit, so relieve the one that is already broken
     {
-        const double settle_now = vel_dir + ((acc_dir * std::abs(acc_dir)) / (2.0 * jerk));
+        const double settle_now = vel_dir + ((acc_dir * fabs(acc_dir)) / two_jerk);
 
         if (settle_now > vel_bound)     // already past the velocity it is allowed to settle at: pull that down, hardest first
         {
@@ -341,8 +389,8 @@ static TrajectoryStep ScanStep(const MotionState& state, const MotionLimits& lim
     }
 
     double acc_next = acc_dir + (jerk_cmd * deltaTime);     // the acceleration this scan ends with
-    acc_next = std::max(-acc_limit_down, std::min(acc_limit_up, acc_next));
-    acc_next = std::max(acc_dir - (jerk * deltaTime), std::min(acc_dir + (jerk * deltaTime), acc_next));     // a state handed in past the limit is walked back at the jerk limit, never jumped
+    acc_next = dmax(acc_floor, dmin(acc_limit_up, acc_next));
+    acc_next = dmax(acc_dir - (jerk * deltaTime), dmin(acc_dir + (jerk * deltaTime), acc_next));     // a state handed in past the limit is walked back at the jerk limit, never jumped
     jerk_cmd = (acc_next - acc_dir) / deltaTime;        // what really gets integrated, so the polynomials stay exact where the clamp bites
 
     const double vel_next = vel_dir + (acc_dir * deltaTime) + (0.5 * jerk_cmd * deltaTime * deltaTime);
@@ -359,29 +407,35 @@ static TrajectoryStep ScanStep(const MotionState& state, const MotionLimits& lim
 // limits the acceleration ramp alone outlasts the move, with the acceleration limits under the
 // velocity one the velocity ramp does, and the axis never takes a single proper step. ordered into
 // locals only, the caller's MotionLimits is const and stays as it was handed in
-static bool OrderLimits(const MotionLimits& limits, double &max_acc, double &max_dec, double &jerk)
+static int OrderLimits(const MotionLimits *limits, double *max_acc, double *max_dec, double *jerk)
 {
-    max_acc = std::max(limits.MaxAcceleration, limits.MaxVelocity);
-    max_dec = std::max(limits.MaxDeceleration, limits.MaxVelocity);
-    jerk = std::max(limits.Jerk, std::max(max_acc, max_dec));
+    *max_acc = dmax(limits->MaxAcceleration, limits->MaxVelocity);
+    *max_dec = dmax(limits->MaxDeceleration, limits->MaxVelocity);
+    *jerk = dmax(limits->Jerk, dmax(*max_acc, *max_dec));
 
-    return ((limits.MaxVelocity > 0.0) && (jerk > 0.0));
+    return ((limits->MaxVelocity > 0.0) && (*jerk > 0.0));
 }
 
-TrajectoryStep GenerateTrajectory(const MotionState& state, const MotionLimits& limits,
-                                  const MotionCommand& command, double deltaTime)
+TrajectoryStep GenerateTrajectory(const MotionState *MOTION_RESTRICT state,
+                                  const MotionLimits *MOTION_RESTRICT limits,
+                                  const MotionCommand *MOTION_RESTRICT command,
+                                  double deltaTime)
 {
     TrajectoryStep step;
-    step.State = state;         // nothing moves unless the scan below says so
+    step.State = *state;        // nothing moves unless the scan below says so
+    step.Jerk = 0.0;
+    step.BrakeDistance = 0.0;
+    step.InPosition = 0;
+    step.InVelocity = 0;
 
     double max_acc, max_dec, jerk;
 
-    if (!OrderLimits(limits, max_acc, max_dec, jerk))
+    if (!OrderLimits(limits, &max_acc, &max_dec, &jerk))
     {
         return step;        // unusable limits, the axis cannot be commanded at all
     }
 
-    const double brake_distance = BrakeDistance(state.Velocity, state.Acceleration, max_dec, jerk);
+    const double brake_distance = CalcBrakeDistance(state->Velocity, state->Acceleration, max_dec, jerk);
 
     step.BrakeDistance = brake_distance;        // of the state this scan was entered with
 
@@ -396,48 +450,48 @@ TrajectoryStep GenerateTrajectory(const MotionState& state, const MotionLimits& 
     double vel_bound;               // the settling velocity may not pass this, in that frame
     double diff_pos = -1.0;         // distance left to the target, negative when there is no target
 
-    if (command.Type == MotionCommandKind::Position)
+    if (command->Type == MOTION_COMMAND_POSITION)
     {
-        diff_pos = std::abs(command.Target - state.Position);
+        diff_pos = fabs(command->Target - state->Position);
 
         // in position: close enough, slow enough to stop inside the window as well, and with an
         // acceleration small enough that parking it is not a jerk step
-        if ((diff_pos < limits.InPositionWindow) && (brake_distance < limits.InPositionWindow)
-            && (std::abs(state.Acceleration) <= (jerk * deltaTime)))
+        if ((diff_pos < limits->InPositionWindow) && (brake_distance < limits->InPositionWindow)
+            && (fabs(state->Acceleration) <= (jerk * deltaTime)))
         {
             step.State.Velocity = 0.0;
             step.State.Acceleration = 0.0;
-            step.InPosition = true;
+            step.InPosition = 1;
             return step;
         }
 
-        dir = (command.Target < state.Position) ? -1.0 : 1.0;
-        vel_bound = limits.MaxVelocity;
+        dir = (command->Target < state->Position) ? -1.0 : 1.0;
+        vel_bound = limits->MaxVelocity;
     }
     else
     {
-        const double vel_cmd = std::max(-limits.MaxVelocity, std::min(limits.MaxVelocity, command.Target));     // a command above the axis limit is not honoured
+        const double vel_cmd = dmax(-limits->MaxVelocity, dmin(limits->MaxVelocity, command->Target));      // a command above the axis limit is not honoured
 
         // at velocity: the same idea as the in position window, one axis up. without it the settling
         // velocity only ever converges towards the command and the acceleration never quite reaches
         // zero. it may only be taken while the software limits still allow another scan at that
         // velocity - parking returns early, so anything skipped here is not checked at all
-        bool may_park = ((std::abs(state.Velocity - vel_cmd) < limits.InVelocityWindow)
-                         && (std::abs(state.Acceleration) <= (jerk * deltaTime)));
+        int may_park = ((fabs(state->Velocity - vel_cmd) < limits->InVelocityWindow)
+                        && (fabs(state->Acceleration) <= (jerk * deltaTime)));
 
-        if (may_park && (limits.PositiveLimit > limits.NegativeLimit))
+        if (may_park && (limits->PositiveLimit > limits->NegativeLimit))
         {
-            const double brake_cmd = BrakeDistance(vel_cmd, 0.0, max_dec, jerk);
-            const double stop_pos = state.Position + (vel_cmd * deltaTime) + ((vel_cmd < 0.0) ? -brake_cmd : brake_cmd);
-            may_park = ((stop_pos >= limits.NegativeLimit) && (stop_pos <= limits.PositiveLimit));
+            const double brake_cmd = CalcBrakeDistance(vel_cmd, 0.0, max_dec, jerk);
+            const double stop_pos = state->Position + (vel_cmd * deltaTime) + ((vel_cmd < 0.0) ? -brake_cmd : brake_cmd);
+            may_park = ((stop_pos >= limits->NegativeLimit) && (stop_pos <= limits->PositiveLimit));
         }
 
         if (may_park)
         {
-            step.State.Position = state.Position + (vel_cmd * deltaTime);
+            step.State.Position = state->Position + (vel_cmd * deltaTime);
             step.State.Velocity = vel_cmd;
             step.State.Acceleration = 0.0;
-            step.InVelocity = true;
+            step.InVelocity = 1;
             return step;
         }
 
@@ -445,7 +499,7 @@ TrajectoryStep GenerateTrajectory(const MotionState& state, const MotionLimits& 
         // same one sided test the position mode uses against max_vel. there is no target to stop on,
         // so diff_pos stays negative and only the software limits bound the travel - in this mode
         // they are the only thing that ever brings the axis to a stop
-        dir = (vel_cmd < state.Velocity) ? -1.0 : 1.0;
+        dir = (vel_cmd < state->Velocity) ? -1.0 : 1.0;
         vel_bound = vel_cmd * dir;
     }
 

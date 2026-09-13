@@ -326,7 +326,7 @@ QWidget* OnlineWindow::buildControlPanel()
     // ---- rig ----
     auto* gbRig = new QGroupBox(tr("Test tezgahı"));
     auto* rigForm = new QFormLayout(gbRig);
-    m_spScan      = makeSpin(0.01, 10.0, 1.0, 0.1, tr(" ms"), 2);
+    m_spScan      = makeSpin(0.001, 100.0, 1.0, 0.05, tr(" ms"), 3);        // deltaTime the generator is called with
     m_spSpeed     = makeSpin(0.02, 1.0, 1.0, 0.05, tr(" ×"), 2);
     m_spWindowSec = makeSpin(0.5, 60.0, 5.0, 0.5, tr(" s"), 1);
     rigForm->addRow(tr("Tarama periyodu"), m_spScan);
@@ -485,6 +485,7 @@ void OnlineWindow::applyParams()
     m_limits.InPositionWindow = m_spWindow->value();
     m_limits.NegativeLimit = m_spNegLimit->value();
     m_limits.PositiveLimit = m_spPosLimit->value();
+    m_limits.InVelocityWindow = 1e-3;       // not on the panel, the rig only drives the position mode
     m_dt = m_spScan->value() / 1000.0;
 
     // one chart sample every few scans is plenty, the window only holds MAX_POINTS anyway
@@ -525,7 +526,8 @@ void OnlineWindow::onTick()
     {
         // the handwheel is sampled inside the scan loop, exactly like a real encoder read:
         // the generator is given a fresh target on every single scan
-        m_step = GenerateTrajectory(m_state, m_limits, { MotionCommandKind::Position, m_targetInput }, m_dt);
+        const MotionCommand command = { MOTION_COMMAND_POSITION, m_targetInput };
+        m_step = GenerateTrajectory(&m_state, &m_limits, &command, m_dt);
         m_state = m_step.State;
 
         m_time += m_dt;

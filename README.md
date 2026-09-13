@@ -6,9 +6,9 @@ There is no stored profile. Nothing is planned up front, nothing is cached, noth
 between calls. Once per cycle the core is handed *where the axis is*, *what it may not exceed* and
 *where it is told to go*, and it returns the state one cycle later:
 
-```cpp
-TrajectoryStep GenerateTrajectory(const MotionState& state, const MotionLimits& limits,
-                                  const MotionCommand& command, double deltaTime);
+```c
+TrajectoryStep GenerateTrajectory(const MotionState *state, const MotionLimits *limits,
+                                  const MotionCommand *command, double deltaTime);
 ```
 
 That is the entire interface. The command may change on any scan — a handwheel, a sensor, a path
@@ -17,9 +17,10 @@ velocity, acceleration, deceleration and jerk limits, every time.
 
 The command is either a **position** to stop on or a **velocity** to hold:
 
-```cpp
-GenerateTrajectory(state, limits, { MotionCommandKind::Position,  250.0 }, dt);   // mm
-GenerateTrajectory(state, limits, { MotionCommandKind::Velocity, -80.0 }, dt);    // mm/s
+```c
+MotionCommand go   = { MOTION_COMMAND_POSITION,  250.0 };   // mm
+MotionCommand jog  = { MOTION_COMMAND_VELOCITY,  -80.0 };   // mm/s
+GenerateTrajectory(&state, &limits, &go, dt);
 ```
 
 The second is what an `MC_MoveVelocity` or a jog is built on. There is no target to stop at, so the
@@ -119,5 +120,6 @@ cmake -B build -S . -DCMAKE_PREFIX_PATH=/opt/homebrew/opt/qt
 cmake --build build -j
 ```
 
-The core itself is two files — `src/TrajectoryGenerator.h` and `src/TrajectoryGenerator.cpp` — and
-depends on nothing but the standard library. Qt is only for the test rig.
+The core itself is two files — `src/TrajectoryGenerator.h` and `src/TrajectoryGenerator.c` — plain
+C99 depending on nothing but `math.h`, so it drops into a controller as it is. The header is
+`extern "C"` guarded, so C++ can include it unchanged. Qt is only for the test rig.

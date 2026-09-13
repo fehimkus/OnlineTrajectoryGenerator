@@ -28,18 +28,24 @@ responsibility, not the core's.
 
 ## Interface
 
-```cpp
-struct MotionState    { double Position, Velocity, Acceleration; };
-struct MotionLimits   { double MaxVelocity, MaxAcceleration, MaxDeceleration, Jerk,
-                               NegativeLimit, PositiveLimit, InPositionWindow, InVelocityWindow; };
-enum class MotionCommandKind { Position, Velocity };
-struct MotionCommand  { MotionCommandKind Type; double Target; };   // mm, or mm/s
-struct TrajectoryStep { MotionState State; double Jerk, BrakeDistance; bool InPosition, InVelocity; };
+```c
+typedef struct { double Position, Velocity, Acceleration; } MotionState;
+typedef struct { double MaxVelocity, MaxAcceleration, MaxDeceleration, Jerk,
+                        NegativeLimit, PositiveLimit, InPositionWindow, InVelocityWindow; } MotionLimits;
+typedef enum   { MOTION_COMMAND_POSITION, MOTION_COMMAND_VELOCITY } MotionCommandKind;
+typedef struct { MotionCommandKind Type; double Target; } MotionCommand;     // mm, or mm/s
+typedef struct { MotionState State; double Jerk, BrakeDistance; int InPosition, InVelocity; } TrajectoryStep;
 
-TrajectoryStep GenerateTrajectory(const MotionState&, const MotionLimits&,
-                                  const MotionCommand&, double deltaTime);
+void   MotionLimitsInit(MotionLimits *limits);      // C structs carry no defaults; restores the two windows
 double BrakeDistance(double cur_vel, double cur_acc, double max_dec, double jerk);
+TrajectoryStep GenerateTrajectory(const MotionState *, const MotionLimits *,
+                                  const MotionCommand *, double deltaTime);
 ```
+
+**The core is C99**, `math.h` and nothing else, so it drops into a controller as it is; the header is
+`extern "C"` guarded for the C++ rig. The arguments are `__restrict` pointers. A C++ caller has to
+value initialise the structs (`MotionState s{};`) — the defaults the C++ version carried are gone,
+`MotionLimitsInit` is what puts the two windows back.
 
 The command kind is a named enum rather than a bare `double` so the **unit of `Target` is written at
 the call site**. Both kinds run through one function split by a single `if`; everything after the
@@ -182,9 +188,16 @@ a `kappa * s_dot^2` term makes the limit mapping state dependent.
 cmake -B build -S .                        # macOS: add -DCMAKE_PREFIX_PATH=/opt/homebrew/opt/qt
 cmake --build build -j
 ./build/onlinetest                         # the only binary: the test rig
+gcc -fsyntax-only -std=c99 -Wall -Wextra src/TrajectoryGenerator.c      # core alone
 ```
 
-The core is `src/TrajectoryGenerator.h/.cpp` and depends on nothing but the standard library. Qt6
+Two targets: `motioncore`, a static library holding the C core alone (AUTOMOC off, links `m`), and
+`onlinetest`, the Qt rig linked against it. Default build type `Release`. The core is compiled with
+`-fno-math-errno` — it drops the errno branch around every `sqrt` and changes no result. **Never
+`-ffast-math`**: it reassociates the formulas, and every verification figure in this file was taken
+on the exact ones. `-O3` measured no faster than `-O2` here.
+
+The core is `src/TrajectoryGenerator.h/.c` and depends on nothing but `math.h`. Qt6
 (Widgets + Charts) is only for the rig, `src/OnlineWindow.cpp/.h` + `src/online_main.cpp`: a handwheel
 slider sampled *inside* the scan loop, four charts against their limits, an adjustable scan period, and
 a random button that randomises the target and all four dynamic limits at once.
@@ -204,6 +217,11 @@ frame rate or the video plays fast. **Never use `screencapture` on the user's de
 - Formulas written out **fully parenthesized and unsimplified**, inline where they are used. Pulling a
   reusable *quantity* into its own function is fine when something else has to evaluate it.
 - Literal constants like `0.1666667` rather than `1.0/6.0`.
+- `dmin` / `dmax` (static inline ternaries), not `fmin` / `fmax` — the libm pair is NaN aware and
+  compiles to a call instead of a `minsd`.
+- Loop invariants may be hoisted out of the jerk search, but **only where the split does not regroup
+  the arithmetic**: the polynomials sum left to right, so `vel_dir + acc_dir*dt` splits off exactly
+  while `dt*dt` does not.
 - Cases laid out as a decision tree of `if / else if / else`, each branch commented with the condition
   it handles.
 - Intermediate results go into clearly named locals.
