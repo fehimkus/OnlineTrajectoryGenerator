@@ -567,6 +567,56 @@ axis is already braking harder than jerk can undo before standstill.
 Both leftovers scale with the scan period, so they are granularity, not formula error.
 Nothing in either branch is known to be wrong any more — the open item is bug 9.
 
+## New architecture attempt (in progress, 2026-09-13)
+
+The user is rewriting the online decision tree by hand inside `GenerateTrajectory`; the previous
+`Tracking` / `Stopping` motion sections were removed and the bottom of the file is an unfinished
+`if (diff_pos > TOLERANCE)` block (does not compile yet — that is work in progress, not a defect).
+Two new top level locals:
+
+- `diff_pos = TargetPosition - CurrentPosition` — remaining distance, signed
+- `brake_velocity = cur_vel + (cur_acc * acc_abs) / (2 * jerk)` — the velocity the axis ends up
+  with if the jerk starts zeroing the acceleration right now. Signed, valid in every branch, no
+  speeding-up / slowing-down split. Same quantity as `delta_vel_zero` in the Tracking notes and
+  `dv_zero` in `Profilerold::BuildRamp`, and identical to the speeding-up branch's `v1`
+  (checked: worst difference 1.1e-13 over the v/a grid).
+
+The concept is right — the brake envelope can only be asked at the `a = 0` point, and this is the
+velocity there. Naming note: it is a *lower* bound while speeding up and an *upper* bound while
+slowing down, so "min hiz" only holds in one branch.
+
+Fixed on request the same day (first draft of the variable):
+
+- it was declared `const` and assigned later, with `Jerk` instead of `jerk` and no `;` — the file
+  did not build
+- it was filled **inside the speeding-up branch only**, so the other three branches saw `0.0`;
+  moved out of the tree, computed once next to `diff_pos`
+- the formula was dimensionally wrong: `0.5*a*a*t*t` (that is `a^2*t^2`, the position polynomial's
+  shape) where the velocity polynomial needs `a*t`, and `0.1666667*jerk*t^3` (a distance) where it
+  needs `0.5*jerk*t^2`. `t` was written `cur_acc/jerk`, negative for a negative acceleration, and
+  the jerk term carried no sign, so it grew the acceleration instead of zeroing it.
+
+One signed `brake_velocity` answers both branch questions; a second velocity is not needed
+(asked 2026-09-13). Speeding up it is "where the velocity settles if the acceleration is eased
+now"; slowing down the same expression equals `sign(v) * (vel_abs - vel_critic)`, so "release the
+jerk now and land exactly on zero" is simply `brake_velocity == 0`. Checked over 1567 slowing-down
+states, worst difference 1.1e-13. Its **sign** then picks the existing sub-branches for free:
+same sign as `cur_vel` = braking not enough, zero = exactly critical, opposite sign = over braking.
+In that last case the value is not an attainable velocity (the velocity crosses zero before the
+acceleration is nulled) — only the sign is usable, the real answer comes from the `solveQuadratic`
+over-braking branch.
+
+What actually differs per branch is not the velocity but (a) the distance `x_null`, (b) which limit
+applies, `max_acc` or `max_dec` — decided by whether the acceleration feeds or fights the motion,
+never by its sign, and (c) `vel_allowed`, the envelope inverted out of the remaining distance.
+That third one is a genuinely separate velocity and is still missing: `brake_velocity` says where
+the axis is forced to go, `vel_allowed` says where it is permitted to go, and the decision is the
+comparison of the two.
+
+Still open: the matching **distance** `x_null = v*t_null + (1/3)*a*t_null^2` is not computed. The
+Tracking notes say forgetting it costs exactly one acceleration ramp of overshoot (1.7 mm per step
+on the rig). Not added — it was not asked for.
+
 ## Working style notes
 
 - The user writes the code themselves; do not change the logic unless asked, just do what
@@ -575,7 +625,12 @@ Nothing in either branch is known to be wrong any more — the open item is bug 
 - Point out bugs, but do not fix them unprompted — ask first.
 
 ---
-*Last update: 2026-09-06 (later the same day) — **the online generator**.
+*Last update: 2026-09-13 — **new architecture attempt**. The user started rewriting the online
+decision tree; `diff_pos` and `brake_velocity` added as top level locals and `brake_velocity`'s
+first draft fixed on request (const assignment, `Jerk` typo, wrong branch, dimensionally wrong
+formula). See the section above. The motion section at the bottom of the file is unfinished.*
+
+*Previous update: 2026-09-06 (later the same day) — **the online generator**.
 `AxisState::Tracking` added and `GenerateTrajectory` extended with the online branch: per scan it
 inverts the brake distance into an allowed velocity, turns that into a peak acceleration, and walks
 the acceleration there with jerk — no stored profile, the target may move every scan. The empty
