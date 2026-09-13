@@ -312,7 +312,7 @@ QWidget* OnlineWindow::buildControlPanel()
     m_spMaxAcc = makeSpin(0.001, 1000000.0, 1000.0, 50.0, tr(" mm/s²"), 2);
     m_spMaxDec = makeSpin(0.001, 1000000.0, 800.0, 50.0, tr(" mm/s²"), 2);
     m_spJerk   = makeSpin(0.001, 10000000.0, 5000.0, 500.0, tr(" mm/s³"), 1);
-    m_spWindow = makeSpin(1e-6, 10.0, 1e-4, 1e-4, tr(" mm"), 6);
+    m_spWindow = makeSpin(1e-6, 10.0, 1e-2, 1e-3, tr(" mm"), 6);      // one scan at the residual velocity is already ~3e-4 mm, a smaller window can never be hit
     limForm->addRow(tr("Maks. hız"), m_spMaxVel);
     limForm->addRow(tr("Maks. ivme"), m_spMaxAcc);
     limForm->addRow(tr("Maks. yavaşlama"), m_spMaxDec);

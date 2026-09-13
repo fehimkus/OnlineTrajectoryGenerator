@@ -35,8 +35,11 @@ void GenerateTrajectory(Axis& axis, double deltaTime)
     const double cur_vel = axis.CurrentVelocity;
     const double acc_abs = std::abs(cur_acc);
     const double vel_abs = std::abs(cur_vel);
-    const double diff_pos = axis.TargetPosition - axis.CurrentPosition; 
-    const double brake_velocity = cur_vel + ((cur_acc * acc_abs) / (2.0 * jerk));      // velocity i would end up with if the jerk started zeroing the acceleration right now
+    const double diff_pos = std::abs(axis.TargetPosition - axis.CurrentPosition);
+    const double dir = (axis.TargetPosition < axis.CurrentPosition) ? -1.0 : 1.0;      // direction of travel, the motion below is solved in it and the sign put back at the end
+    const double vel_dir = cur_vel * dir;       // velocity towards the target
+    const double acc_dir = cur_acc * dir;       // acceleration towards the target
+    const double brake_velocity = max_vel - ((acc_dir * acc_abs) / (2.0 * jerk));      // velocity threshold: above this the jerk has to be eased off or max_vel is overshot
     
     double brake_distance = 0.0;        // distance i would cover if i braked right now
     double t1, t2, t3;          // phase durations
@@ -263,23 +266,120 @@ void GenerateTrajectory(Axis& axis, double deltaTime)
         return;
     }
 
-    if(diff_pos > TOLERANCE)
+    // in position: close enough, slow enough to stop inside the window as well, and with an
+    // acceleration small enough that parking it is not a jerk step. without this the axis can
+    // never settle - the envelope is a cube root of the remaining distance, so its slope runs
+    // away at the target and a finite scan can only ever hunt around it
+    if ((diff_pos < axis.InPositionWindow) && (brake_distance < axis.InPositionWindow) && (acc_abs <= (jerk * deltaTime)))
     {
-        if (diff_pos > brake_distance)
-        {
-            if (abs(cur_acc) < max_acc)
-            {
-                axis.CurrentAcceleration = cur_acc + signvelocity * jerk * deltaTime;
-                if (abs(cur_vel) < max_vel)
-                {
-                    axis.CurrentVelocity = cur_vel + cur_acc * deltaTime;
-                }
-            }
-            axis.CurrentPosition += cur_vel * deltaTime;
-        }
-
-
+        axis.CurrentVelocity = 0.0;
+        axis.CurrentAcceleration = 0.0;
+        axis.CommandedJerk = 0.0;
+        axis.VelocityCommand = 0.0;
+        return;
     }
 
+    if(diff_pos > TOLERANCE)
+    {
+        const double acc_limit_up = (vel_dir < -TOLERANCE) ? max_dec : max_acc;     // an acceleration towards the target speeds the axis up unless it is still running the other way
+        const double acc_limit_down = (vel_dir > TOLERANCE) ? max_dec : max_acc;    // one away from the target slows it down unless it is still running the other way
 
+        // one velocity command, no accelerate / brake split: the envelope carries both, and a
+        // branch test sitting on its own switching surface is what made the two fight.
+        // the envelope only knows how to brake from a standing acceleration, so the ground covered
+        // while the jerk nulls the one the axis has comes off the remaining distance first
+        double t_null = acc_abs / jerk;     // time the jerk needs to null the acceleration
+        const double jerk_null = (acc_dir < 0.0) ? jerk : -jerk;        // it always opposes the acceleration
+
+        if ((acc_dir < 0.0) && (vel_dir > 0.0) && (vel_dir < ((acc_abs * acc_abs) / (2.0 * jerk))))
+        {
+            double t_root1, t_root2;        // over braking: the velocity reaches zero before the acceleration does, so the ramp never completes
+            if (solveQuadratic((0.5 * jerk), -acc_abs, vel_dir, t_root1, t_root2))
+            {
+                t_null = t_root2;       // smaller root, standstill
+            }
+        }
+
+        const double x_null = (vel_dir * t_null) + (0.5 * acc_dir * t_null * t_null) + (0.1666667 * jerk_null * t_null * t_null * t_null);       // distance covered while that happens, signed
+        const double diff_pos_zero = diff_pos - x_null;     // what is left of the distance at that point
+
+        double vel_allowed;     // the velocity that distance permits
+
+        if (diff_pos_zero <= 0.0)       // the target is gone before the acceleration can be nulled
+        {
+            vel_allowed = 0.0;
+        }
+        else if (diff_pos_zero > ((max_dec * max_dec * max_dec) / (jerk * jerk)))        // max_dec is reached on the way down, trapezoidal brake
+        {
+            double vel_root1, vel_root2;
+            solveQuadratic((1.0 / (2.0 * max_dec)), (max_dec / (2.0 * jerk)), -diff_pos_zero, vel_root1, vel_root2);      // inverse of diff_pos_zero = v*v/(2*max_dec) + v*max_dec/(2*jerk)
+            vel_allowed = vel_root1;        // larger root, the positive one
+        }
+        else        // max_dec is never reached, triangular brake
+        {
+            vel_allowed = std::cbrt(diff_pos_zero * diff_pos_zero * jerk);      // inverse of diff_pos_zero = v^1.5 / sqrt(jerk)
+        }
+
+        const double vel_command = std::min(vel_allowed, max_vel);      // the envelope can never permit more than the limit
+
+        // peak acceleration of the ramp that takes (vel_dir, acc_dir) to (vel_command, 0)
+        const double delta_vel = vel_command - vel_dir;
+        const double delta_vel_zero = (acc_dir * acc_abs) / (2.0 * jerk);       // velocity still picked up while the acceleration is nulled
+
+        double acc_target;      // where the acceleration wants to be this scan
+
+        if (delta_vel > delta_vel_zero)     // the command is above where nulling the acceleration lands, so speed up
+        {
+            acc_target = std::sqrt((jerk * delta_vel) + (0.5 * acc_dir * acc_dir));
+        }
+        else        // it is below, so slow down
+        {
+            acc_target = -std::sqrt((0.5 * acc_dir * acc_dir) - (jerk * delta_vel));
+        }
+
+        const double acc_exact = ((2.0 * delta_vel) / deltaTime) - acc_dir;     // the acceleration that puts the velocity exactly on the command at the end of this scan
+
+        if (delta_vel > 0.0)        // never ask for more than that, the square roots have unbounded slope at delta_vel = 0
+        {
+            acc_target = std::min(acc_target, acc_exact);
+        }
+        else
+        {
+            acc_target = std::max(acc_target, acc_exact);
+        }
+
+        if (diff_pos_zero <= 0.0)       // the acceleration can no longer be nulled before the target, braking is all that is left
+        {
+            acc_target = -acc_limit_down;       // the ramp law would read the standing deceleration as "too much" and release it
+        }
+
+        acc_target = std::max(-acc_limit_down, std::min(acc_limit_up, acc_target));     // the limit follows the speed, not the sign of the acceleration
+
+        double acc_next;        // the acceleration this scan ends with
+
+        if (acc_target > acc_dir)       // jerk walks towards the target and stops exactly on it
+        {
+            acc_next = std::min(acc_target, acc_dir + (jerk * deltaTime));
+        }
+        else
+        {
+            acc_next = std::max(acc_target, acc_dir - (jerk * deltaTime));
+        }
+
+        const double jerk_cmd = (acc_next - acc_dir) / deltaTime;       // what really gets integrated, so the polynomials stay exact where the clamps bite
+
+        axis.VelocityCommand = dir * vel_command;       // what this scan aimed at
+        axis.CurrentPosition = cur_pos + (dir * ((vel_dir * deltaTime) + (0.5 * acc_dir * deltaTime * deltaTime) + (0.1666667 * jerk_cmd * deltaTime * deltaTime * deltaTime)));
+        axis.CurrentVelocity = dir * (vel_dir + (acc_dir * deltaTime) + (0.5 * jerk_cmd * deltaTime * deltaTime));
+        axis.CurrentAcceleration = dir * acc_next;
+        axis.CommandedJerk = dir * jerk_cmd;
+    }
+    else        // the target is inside the tolerance ----- the axis is there, park it
+    {
+        axis.CurrentPosition = axis.TargetPosition;
+        axis.CurrentVelocity = 0.0;
+        axis.CurrentAcceleration = 0.0;
+        axis.CommandedJerk = 0.0;
+        axis.VelocityCommand = 0.0;
+    }
 }
