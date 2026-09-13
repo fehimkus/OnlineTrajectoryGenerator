@@ -22,25 +22,13 @@ bool solveQuadratic(double a, double b, double c, double &x1, double &x2)
     return true;
 }
 
-void GenerateTrajectory(Axis& axis, double deltaTime)
+// distance the axis covers if it starts braking right now, until standstill. magnitude, always
+// positive. only needs the state and the two limits the braking phases use
+double BrakeDistance(double cur_vel, double cur_acc, double max_dec, double jerk)
 {
-    const double max_vel = axis.MaxVelocity;
-    const double max_dec = axis.MaxDeceleration;
-    const double max_acc = axis.MaxAcceleration;
-    const double jerk = axis.Jerk;
-
-    // precompute for jerk decision
-    const double cur_pos = axis.CurrentPosition;
-    const double cur_acc = axis.CurrentAcceleration;
-    const double cur_vel = axis.CurrentVelocity;
     const double acc_abs = std::abs(cur_acc);
     const double vel_abs = std::abs(cur_vel);
-    const double diff_pos = std::abs(axis.TargetPosition - axis.CurrentPosition);
-    const double dir = (axis.TargetPosition < axis.CurrentPosition) ? -1.0 : 1.0;      // direction of travel, the motion below is solved in it and the sign put back at the end
-    const double vel_dir = cur_vel * dir;       // velocity towards the target
-    const double acc_dir = cur_acc * dir;       // acceleration towards the target
-    const double brake_velocity = max_vel - ((acc_dir * acc_abs) / (2.0 * jerk));      // velocity threshold: above this the jerk has to be eased off or max_vel is overshot
-    
+
     double brake_distance = 0.0;        // distance i would cover if i braked right now
     double t1, t2, t3;          // phase durations
     double x1, x2, x3, x4;      // distance covered in each phase
@@ -250,136 +238,219 @@ void GenerateTrajectory(Axis& axis, double deltaTime)
         }
     }
 
-    axis.BrakeDistance = brake_distance;        // handed out so the UI can read it every scan
-    axis.CommandedJerk = 0.0;
-    axis.VelocityCommand = 0.0;
+    return brake_distance;
+}
 
-    
+// the scan both modes share. everything here works in the direction frame the caller picked, and
+// the sign is put back on the way out. vel_bound is what the settling velocity may not exceed in
+// that frame; diff_pos is the distance left to the target, or negative when there is no target
+static TrajectoryStep ScanStep(const MotionState& state, const MotionLimits& limits, double deltaTime,
+                               double dir, double vel_bound, double diff_pos,
+                               double max_acc, double max_dec, double jerk)
+{
+    TrajectoryStep step;
+    step.State = state;
 
+    const double cur_pos = state.Position;
+    const double vel_dir = state.Velocity * dir;        // velocity in the direction the scan is solved in
+    const double acc_dir = state.Acceleration * dir;
 
-    // ---------------------------------------------------------------- the motion itself
-    // the brake distance above belongs to the state this scan started with, so the axis is
-    // only walked forward after that value has been handed out
+    // every limit is a statement about the state the axis will be in at the END of this scan, not
+    // the one it is in now. tested on the current state every switch lands a scan late, and what one
+    // late scan costs cannot be given back - max_acc * deltaTime of velocity at the limit, the
+    // matching ground at the target. so the jerk itself is searched: the largest one whose end of
+    // scan state still honours every limit
+    const double acc_limit_up = (vel_dir < -TOLERANCE) ? max_dec : max_acc;     // an acceleration along the frame speeds the axis up unless it is still running the other way
+    const double acc_limit_down = (vel_dir > TOLERANCE) ? max_dec : max_acc;    // one against it slows the axis down unless it is still running the other way
 
-    if (deltaTime <= 0.0)
+    // software limits are honoured by asking where the axis comes to rest, not where it is now
+    const bool limits_on = (limits.PositiveLimit > limits.NegativeLimit);
+    const double breach_now = std::max(0.0, std::max(limits.NegativeLimit - cur_pos, cur_pos - limits.PositiveLimit));      // how far outside it already is
+
+    double jerk_lo = -jerk;     // the fallback below covers the case where even this is not feasible
+    double jerk_hi = jerk;
+    bool feasible = false;
+
+    for (int i = 0; i < BISECTION_STEPS; i++)
     {
-        return;
-    }
+        const double jerk_try = (0.5 * (jerk_lo + jerk_hi));
+        const double acc_end = acc_dir + (jerk_try * deltaTime);
+        const double vel_end = vel_dir + (acc_dir * deltaTime) + (0.5 * jerk_try * deltaTime * deltaTime);
+        const double pos_end = (vel_dir * deltaTime) + (0.5 * acc_dir * deltaTime * deltaTime) + (0.1666667 * jerk_try * deltaTime * deltaTime * deltaTime);
 
-    // in position: close enough, slow enough to stop inside the window as well, and with an
-    // acceleration small enough that parking it is not a jerk step. without this the axis can
-    // never settle - the envelope is a cube root of the remaining distance, so its slope runs
-    // away at the target and a finite scan can only ever hunt around it
-    if ((diff_pos < axis.InPositionWindow) && (brake_distance < axis.InPositionWindow) && (acc_abs <= (jerk * deltaTime)))
-    {
-        axis.CurrentVelocity = 0.0;
-        axis.CurrentAcceleration = 0.0;
-        axis.CommandedJerk = 0.0;
-        axis.VelocityCommand = 0.0;
-        return;
-    }
+        bool ok = ((acc_end <= acc_limit_up) && (acc_end >= -acc_limit_down))
+                  && ((vel_end + ((acc_end * std::abs(acc_end)) / (2.0 * jerk))) <= vel_bound);      // where the velocity settles once that acceleration is nulled
 
-    if(diff_pos > TOLERANCE)
-    {
-        const double acc_limit_up = (vel_dir < -TOLERANCE) ? max_dec : max_acc;     // an acceleration towards the target speeds the axis up unless it is still running the other way
-        const double acc_limit_down = (vel_dir > TOLERANCE) ? max_dec : max_acc;    // one away from the target slows it down unless it is still running the other way
-
-        // one velocity command, no accelerate / brake split: the envelope carries both, and a
-        // branch test sitting on its own switching surface is what made the two fight.
-        // the envelope only knows how to brake from a standing acceleration, so the ground covered
-        // while the jerk nulls the one the axis has comes off the remaining distance first
-        double t_null = acc_abs / jerk;     // time the jerk needs to null the acceleration
-        const double jerk_null = (acc_dir < 0.0) ? jerk : -jerk;        // it always opposes the acceleration
-
-        if ((acc_dir < 0.0) && (vel_dir > 0.0) && (vel_dir < ((acc_abs * acc_abs) / (2.0 * jerk))))
+        if (ok && (limits_on || (diff_pos >= 0.0)))
         {
-            double t_root1, t_root2;        // over braking: the velocity reaches zero before the acceleration does, so the ramp never completes
-            if (solveQuadratic((0.5 * jerk), -acc_abs, vel_dir, t_root1, t_root2))
+            const double brake_end = BrakeDistance(vel_end, acc_end, max_dec, jerk);
+
+            if (diff_pos >= 0.0)        // there is a target to stop on
             {
-                t_null = t_root2;       // smaller root, standstill
+                const double diff_end = diff_pos - pos_end;     // distance still left to it after this scan
+                ok = ((diff_end >= 0.0) && (brake_end <= diff_end));
+            }
+
+            if (ok && limits_on)        // where it would come to rest, signed and back in world coordinates
+            {
+                const double stop_pos = cur_pos + (dir * (pos_end + ((vel_end < 0.0) ? -brake_end : brake_end)));
+                const double breach_end = std::max(0.0, std::max(limits.NegativeLimit - stop_pos, stop_pos - limits.PositiveLimit));
+
+                // inside the limits, or at least closer to them than it already is - the second half
+                // is what lets an axis that starts outside drive back in instead of being frozen
+                ok = ((breach_end <= 0.0) || (breach_end < breach_now));
             }
         }
 
-        const double x_null = (vel_dir * t_null) + (0.5 * acc_dir * t_null * t_null) + (0.1666667 * jerk_null * t_null * t_null * t_null);       // distance covered while that happens, signed
-        const double diff_pos_zero = diff_pos - x_null;     // what is left of the distance at that point
-
-        double vel_allowed;     // the velocity that distance permits
-
-        if (diff_pos_zero <= 0.0)       // the target is gone before the acceleration can be nulled
+        if (ok)
         {
-            vel_allowed = 0.0;
-        }
-        else if (diff_pos_zero > ((max_dec * max_dec * max_dec) / (jerk * jerk)))        // max_dec is reached on the way down, trapezoidal brake
-        {
-            double vel_root1, vel_root2;
-            solveQuadratic((1.0 / (2.0 * max_dec)), (max_dec / (2.0 * jerk)), -diff_pos_zero, vel_root1, vel_root2);      // inverse of diff_pos_zero = v*v/(2*max_dec) + v*max_dec/(2*jerk)
-            vel_allowed = vel_root1;        // larger root, the positive one
-        }
-        else        // max_dec is never reached, triangular brake
-        {
-            vel_allowed = std::cbrt(diff_pos_zero * diff_pos_zero * jerk);      // inverse of diff_pos_zero = v^1.5 / sqrt(jerk)
-        }
-
-        const double vel_command = std::min(vel_allowed, max_vel);      // the envelope can never permit more than the limit
-
-        // peak acceleration of the ramp that takes (vel_dir, acc_dir) to (vel_command, 0)
-        const double delta_vel = vel_command - vel_dir;
-        const double delta_vel_zero = (acc_dir * acc_abs) / (2.0 * jerk);       // velocity still picked up while the acceleration is nulled
-
-        double acc_target;      // where the acceleration wants to be this scan
-
-        if (delta_vel > delta_vel_zero)     // the command is above where nulling the acceleration lands, so speed up
-        {
-            acc_target = std::sqrt((jerk * delta_vel) + (0.5 * acc_dir * acc_dir));
-        }
-        else        // it is below, so slow down
-        {
-            acc_target = -std::sqrt((0.5 * acc_dir * acc_dir) - (jerk * delta_vel));
-        }
-
-        const double acc_exact = ((2.0 * delta_vel) / deltaTime) - acc_dir;     // the acceleration that puts the velocity exactly on the command at the end of this scan
-
-        if (delta_vel > 0.0)        // never ask for more than that, the square roots have unbounded slope at delta_vel = 0
-        {
-            acc_target = std::min(acc_target, acc_exact);
+            jerk_lo = jerk_try;
+            feasible = true;
         }
         else
         {
-            acc_target = std::max(acc_target, acc_exact);
+            jerk_hi = jerk_try;
         }
-
-        if (diff_pos_zero <= 0.0)       // the acceleration can no longer be nulled before the target, braking is all that is left
-        {
-            acc_target = -acc_limit_down;       // the ramp law would read the standing deceleration as "too much" and release it
-        }
-
-        acc_target = std::max(-acc_limit_down, std::min(acc_limit_up, acc_target));     // the limit follows the speed, not the sign of the acceleration
-
-        double acc_next;        // the acceleration this scan ends with
-
-        if (acc_target > acc_dir)       // jerk walks towards the target and stops exactly on it
-        {
-            acc_next = std::min(acc_target, acc_dir + (jerk * deltaTime));
-        }
-        else
-        {
-            acc_next = std::max(acc_target, acc_dir - (jerk * deltaTime));
-        }
-
-        const double jerk_cmd = (acc_next - acc_dir) / deltaTime;       // what really gets integrated, so the polynomials stay exact where the clamps bite
-
-        axis.VelocityCommand = dir * vel_command;       // what this scan aimed at
-        axis.CurrentPosition = cur_pos + (dir * ((vel_dir * deltaTime) + (0.5 * acc_dir * deltaTime * deltaTime) + (0.1666667 * jerk_cmd * deltaTime * deltaTime * deltaTime)));
-        axis.CurrentVelocity = dir * (vel_dir + (acc_dir * deltaTime) + (0.5 * jerk_cmd * deltaTime * deltaTime));
-        axis.CurrentAcceleration = dir * acc_next;
-        axis.CommandedJerk = dir * jerk_cmd;
     }
-    else        // the target is inside the tolerance ----- the axis is there, park it
+
+    // every midpoint passed, so the boundary sits above the limit and the limit itself is feasible.
+    // without this the search only ever converges towards it and the jerk output never reads exactly
+    // +Jerk in the phases where it is saturated
+    double jerk_cmd = (jerk_hi >= jerk) ? jerk : jerk_lo;
+
+    if (!feasible)      // nothing this scan can do keeps the axis inside every limit, so relieve the one that is already broken
     {
-        axis.CurrentPosition = axis.TargetPosition;
-        axis.CurrentVelocity = 0.0;
-        axis.CurrentAcceleration = 0.0;
-        axis.CommandedJerk = 0.0;
-        axis.VelocityCommand = 0.0;
+        const double settle_now = vel_dir + ((acc_dir * std::abs(acc_dir)) / (2.0 * jerk));
+
+        if (settle_now > vel_bound)     // already past the velocity it is allowed to settle at: pull that down, hardest first
+        {
+            jerk_cmd = -jerk;
+        }
+        else if (vel_dir > 0.0)         // otherwise it is the distance that cannot be held, so brake the motion it has
+        {
+            jerk_cmd = -jerk;
+        }
+        else if (vel_dir < 0.0)
+        {
+            jerk_cmd = jerk;
+        }
+        else
+        {
+            jerk_cmd = (acc_dir > 0.0) ? -jerk : jerk;      // standing still, kill the acceleration
+        }
     }
+
+    double acc_next = acc_dir + (jerk_cmd * deltaTime);     // the acceleration this scan ends with
+    acc_next = std::max(-acc_limit_down, std::min(acc_limit_up, acc_next));
+    acc_next = std::max(acc_dir - (jerk * deltaTime), std::min(acc_dir + (jerk * deltaTime), acc_next));     // a state handed in past the limit is walked back at the jerk limit, never jumped
+    jerk_cmd = (acc_next - acc_dir) / deltaTime;        // what really gets integrated, so the polynomials stay exact where the clamp bites
+
+    const double vel_next = vel_dir + (acc_dir * deltaTime) + (0.5 * jerk_cmd * deltaTime * deltaTime);
+
+    step.State.Position = cur_pos + (dir * ((vel_dir * deltaTime) + (0.5 * acc_dir * deltaTime * deltaTime) + (0.1666667 * jerk_cmd * deltaTime * deltaTime * deltaTime)));
+    step.State.Velocity = dir * vel_next;
+    step.State.Acceleration = dir * acc_next;
+    step.Jerk = dir * jerk_cmd;
+
+    return step;
+}
+
+// the limits have to be ordered or the profile degenerates: with the jerk under the acceleration
+// limits the acceleration ramp alone outlasts the move, with the acceleration limits under the
+// velocity one the velocity ramp does, and the axis never takes a single proper step. ordered into
+// locals only, the caller's MotionLimits is const and stays as it was handed in
+static bool OrderLimits(const MotionLimits& limits, double &max_acc, double &max_dec, double &jerk)
+{
+    max_acc = std::max(limits.MaxAcceleration, limits.MaxVelocity);
+    max_dec = std::max(limits.MaxDeceleration, limits.MaxVelocity);
+    jerk = std::max(limits.Jerk, std::max(max_acc, max_dec));
+
+    return ((limits.MaxVelocity > 0.0) && (jerk > 0.0));
+}
+
+TrajectoryStep GenerateTrajectory(const MotionState& state, const MotionLimits& limits,
+                                  const MotionCommand& command, double deltaTime)
+{
+    TrajectoryStep step;
+    step.State = state;         // nothing moves unless the scan below says so
+
+    double max_acc, max_dec, jerk;
+
+    if (!OrderLimits(limits, max_acc, max_dec, jerk))
+    {
+        return step;        // unusable limits, the axis cannot be commanded at all
+    }
+
+    const double brake_distance = BrakeDistance(state.Velocity, state.Acceleration, max_dec, jerk);
+
+    step.BrakeDistance = brake_distance;        // of the state this scan was entered with
+
+    // the brake distance above belongs to the state this scan started with, so the axis is
+    // only walked forward after that value has been taken
+    if (deltaTime <= 0.0)
+    {
+        return step;
+    }
+
+    double dir;                     // the direction the scan is solved in
+    double vel_bound;               // the settling velocity may not pass this, in that frame
+    double diff_pos = -1.0;         // distance left to the target, negative when there is no target
+
+    if (command.Type == MotionCommandKind::Position)
+    {
+        diff_pos = std::abs(command.Target - state.Position);
+
+        // in position: close enough, slow enough to stop inside the window as well, and with an
+        // acceleration small enough that parking it is not a jerk step
+        if ((diff_pos < limits.InPositionWindow) && (brake_distance < limits.InPositionWindow)
+            && (std::abs(state.Acceleration) <= (jerk * deltaTime)))
+        {
+            step.State.Velocity = 0.0;
+            step.State.Acceleration = 0.0;
+            step.InPosition = true;
+            return step;
+        }
+
+        dir = (command.Target < state.Position) ? -1.0 : 1.0;
+        vel_bound = limits.MaxVelocity;
+    }
+    else
+    {
+        const double vel_cmd = std::max(-limits.MaxVelocity, std::min(limits.MaxVelocity, command.Target));     // a command above the axis limit is not honoured
+
+        // at velocity: the same idea as the in position window, one axis up. without it the settling
+        // velocity only ever converges towards the command and the acceleration never quite reaches
+        // zero. it may only be taken while the software limits still allow another scan at that
+        // velocity - parking returns early, so anything skipped here is not checked at all
+        bool may_park = ((std::abs(state.Velocity - vel_cmd) < limits.InVelocityWindow)
+                         && (std::abs(state.Acceleration) <= (jerk * deltaTime)));
+
+        if (may_park && (limits.PositiveLimit > limits.NegativeLimit))
+        {
+            const double brake_cmd = BrakeDistance(vel_cmd, 0.0, max_dec, jerk);
+            const double stop_pos = state.Position + (vel_cmd * deltaTime) + ((vel_cmd < 0.0) ? -brake_cmd : brake_cmd);
+            may_park = ((stop_pos >= limits.NegativeLimit) && (stop_pos <= limits.PositiveLimit));
+        }
+
+        if (may_park)
+        {
+            step.State.Position = state.Position + (vel_cmd * deltaTime);
+            step.State.Velocity = vel_cmd;
+            step.State.Acceleration = 0.0;
+            step.InVelocity = true;
+            return step;
+        }
+
+        // solved in the direction the velocity has to move in, so "do not pass the command" stays the
+        // same one sided test the position mode uses against max_vel. there is no target to stop on,
+        // so diff_pos stays negative and only the software limits bound the travel - in this mode
+        // they are the only thing that ever brings the axis to a stop
+        dir = (vel_cmd < state.Velocity) ? -1.0 : 1.0;
+        vel_bound = vel_cmd * dir;
+    }
+
+    step = ScanStep(state, limits, deltaTime, dir, vel_bound, diff_pos, max_acc, max_dec, jerk);
+    step.BrakeDistance = brake_distance;
+
+    return step;
 }

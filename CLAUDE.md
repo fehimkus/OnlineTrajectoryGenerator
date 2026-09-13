@@ -8,6 +8,155 @@
   is nothing to update, say "no update", do not skip it silently.
 - Everything in this repo is written in **English**: this file, code comments, docs.
 
+## Velocity mode — added 2026-09-13
+
+```cpp
+enum class MotionCommandKind { Position, Velocity };
+struct MotionCommand { MotionCommandKind Type; double Target; };    // mm when Position, mm/s when Velocity
+
+TrajectoryStep GenerateTrajectory(const MotionState&, const MotionLimits&,
+                                  const MotionCommand&, double deltaTime);
+```
+
+The velocity command is what an `MC_MoveVelocity` or a jog is built on. It started as a second free
+function, `GenerateVelocityStep`; on the user's call (2026-09-13) the two were merged into **one
+entry point split by a single `if`**, with the command's kind named in a small struct so the unit of
+`Target` is written at the call site rather than implied by a bare `double`. Behaviour is identical
+either way — every number below was re-measured after the merge and none moved.
+
+Both branches share one body, `ScanStep` (110 lines), which works in whatever direction frame the
+caller picks. The position branch picks it from the position error and passes the remaining distance;
+the velocity branch picks it from the **velocity** error and passes `diff_pos < 0` to mean "no target
+to stop at". Sharing matters: the open signed-stop-displacement defect will be fixed once for both.
+
+Why not express a velocity command as a position one (aim at the software limit, cap `MaxVelocity`
+at `|v_cmd|`)? It nearly works and was considered, but it breaks on `v_cmd = 0` (`MaxVelocity = 0`
+makes the core refuse to move at all), needs an infinite target when no software limits are set, and
+pushes the fake target and its sign onto exactly the caller this is meant to spare.
+
+In velocity mode the software limits are the **only** thing that ever stops the axis, which is the
+strongest argument for having kept them in the core. `MotionLimits` gained `InVelocityWindow`
+(1e-3 mm/s), `TrajectoryStep` gained `InVelocity` — the same park idea one axis up, because the
+settling velocity otherwise only converges towards the command without ever reaching it.
+
+Measured over 2000 runs per scan period, limits randomised, start states filtered to ones the limits
+could actually have produced:
+
+| | 2 ms | 1 ms | 0.2 ms |
+|---|---|---|---|
+| reached the command | **2000/2000** | **2000/2000** | **2000/2000** |
+| `\|v - cmd\|` at the end | **0.0e+00** | **0.0e+00** | **0.0e+00** |
+| wander after reaching | **0** | **0** | **0** |
+| over `MaxVelocity` | **0.0e+00** | **0.0e+00** | **0.0e+00** |
+| over `Jerk` | 1.1e-10 | 2.8e-10 | 2.1e-9 |
+
+`200 -> -150 -> 0` stepped mid run at 1 ms lands exactly on all three with no limit exceeded; a
+`+200 mm/s` command against a `+100 mm` software limit comes to rest at **100.000000 mm** (breach
+3.7e-07); a command above `MaxVelocity` is clamped to it. **The position mode is byte-for-byte
+unchanged** by the refactor and the fixes below.
+
+### Three real defects found building it
+
+1. **The acceleration clamp could break the jerk limit** — this one predated velocity mode and no
+   earlier test had provoked it. If the caller hands in a state whose acceleration is outside the
+   limit that currently applies, the final clamp moved it inside **in one scan**: measured jerk
+   **3.7e6** against a limit of 5000. The clamp is now rate-limited to `jerk * deltaTime`, so an
+   out-of-limit start acceleration is walked back instead of jumped. Worst jerk excursion 4e-10.
+2. **The at-velocity park skipped the whole scan**, software limits included, so an axis cruising on
+   command ignored them for ever — it ran 3860 mm past a +100 mm limit. The park is now only taken
+   when the limits still allow another scan at that velocity.
+3. **The fallback pointed the wrong way in velocity mode.** "Brake the motion the axis has" is right
+   when the distance cannot be held; when it is the *velocity* bound that is broken, the thing to do
+   is pull the settling velocity down. The axis was overshooting the command by exactly
+   `max_dec^2/(2*jerk)` = 64 mm/s, one acceleration ramp. The fallback now looks at which constraint
+   is actually broken.
+
+### Open in velocity mode
+
+- **The acceleration limit is exceeded transiently at a zero crossing.** An acceleration that was
+  legally `max_dec` while slowing a backward motion becomes an *acceleration* the moment the velocity
+  crosses zero, and if `max_acc` is smaller it is over it. The core walks it back at the jerk limit —
+  dropping it instantly would break jerk, so the excursion is unavoidable and bounded by
+  `max_dec - max_acc`.
+- **Some reversing cases pass the command and come back** (worst ~280-400 mm/s with `MaxVelocity` up
+  to 500). Reaching and holding are unaffected (2000/2000, zero wander). Not chased yet; likely the
+  same root as the zero crossing above.
+- The `MotionLimits` -> `MotionConstraints` rename was proposed and is still unanswered. The name
+  matters because a motion block folds *command* dynamics and *axis* limits into these fields — the
+  core does not care which is which, but the name suggests it only takes machine limits.
+
+## Prior art worth knowing about
+
+Jerk-limited **online trajectory generation** is a well worked field; this core is a good solution to
+a known problem, not a new one. Reference points to measure against (not verified from inside this
+session, but they exist and are worth reading):
+
+- **Ruckig** (Berscheid & Kroger, 2021) — open source, jerk limited, **multi-axis with time
+  synchronisation**, and it handles arbitrary *target* states (non-zero velocity and acceleration),
+  not just target positions. Widely used in robotics.
+- **Reflexxes Motion Libraries** (Kroger) — its predecessor, Type II / IV.
+- Every large CNC and robot vendor has an in-house equivalent.
+
+What this core does is the **single-axis, zero-target-velocity** case. That is a strictly easier
+problem than the ones above, and the honest framing is that the value here is ownership,
+auditability and the verification trail, not novelty.
+
+**What would actually raise it, in order of impact:** (1) close the signed-stop-displacement defect —
+it sits exactly on the selling point, the moving target; (2) multi-axis with time synchronisation,
+which is the real step from component to product; (3) non-zero target velocity, which would let the
+core guarantee a corner velocity instead of leaving blending to the caller; (4) a run on real
+hardware with real jitter, which is worth more than the whole simulation table.
+
+## README
+
+`README.md` was rewritten 2026-09-13 and is now the outward-facing description: what the core is, why
+scan-based, where it applies (CNC, robotics, mobile robots, gantries), a measured verification table,
+and an explicit **what is not verified yet** section. Keep that honest section honest — the numbers in
+it come from this file, so when a measurement here changes, the README changes with it.
+
+`docs/rig.png` is a screenshot of the rig and `docs/rig.mp4` a 20 s recording of it (1600x950,
+17 fps, 7.6 MB). Both were made **without touching the user's screen**, by running the binary under
+`QT_QPA_PLATFORM=offscreen` with a temporary flag in `online_main.cpp`:
+
+- `--shot <path>` clicks the random-step button, waits, calls `QWidget::grab()` and quits
+- `--record <dir>` grabs a frame every 40 ms on a schedule — 0-5 s clicking the random-step button,
+  5-15 s driving the handwheel `QSlider` along a two-frequency sine so it looks hand-swung, 15-20 s
+  random again — then quits
+
+Both flags were reverted after the capture; add them back the same way to refresh. The frames were
+encoded with a throwaway Swift program using `AVAssetWriter` (no ffmpeg, no imageio and no Pillow on
+this machine; Qt cannot write GIF either). Capture runs at ~17 fps, not the 40 ms the timer asks for,
+because grabbing and saving a PNG that size takes longer — so encode at the measured rate, not the
+nominal one, or the video plays fast. **Never use `screencapture` on the user's desktop for this.**
+
+## What this repo is
+
+**A trajectory core, not a motion controller.** It answers one question, once per scan: given where
+the axis is, what it may not exceed, and where it is told to go, what is the state one scan later.
+
+It owns nothing. There is no `Axis` struct any more (removed 2026-09-13 — live state, target and
+parameters belong to the layer above), nothing is kept between calls, and nothing is written back:
+
+```cpp
+TrajectoryStep GenerateTrajectory(const MotionState& state, const MotionLimits& limits,
+                                  double target, double deltaTime);
+```
+
+`MotionState` is position / velocity / acceleration. `MotionLimits` is the four dynamic limits, the
+two software position limits and the in-position window. `TrajectoryStep` returns the state at the
+end of the scan, the jerk that was really applied, the brake distance of the state it was entered
+with, and an `InPosition` flag.
+
+**What belongs to the caller** — the motion layer written on top: the state machine, `Done` / `Busy`
+/ `Active` / `CommandAborted` / `Error`, buffer modes, blending and `MC_Stop` priority. Blending needs
+nothing new from the core: handing in a fresh target on any scan is exactly what the core is built
+for, and the caller picks the switch instant to get the corner velocity it wants. A **feed override**
+is likewise just a scaled `MaxVelocity` handed in — a `FeedOverride` field was added and removed the
+same day once that was clear.
+
+**`deltaTime` is a plain parameter.** Calling the core on a deterministic cycle is the integrator's
+responsibility, not the core's.
+
 ## Goal
 
 An online (real-time) trajectory generator, staying within motion control standards
@@ -91,22 +240,16 @@ an over braking case leaves its leftover deceleration.
 
 | File | Contents |
 |---|---|
-| `src/Axis.h` | Axis state + parameters (limits, jerk, live values), `BrakeDistance` output |
-| `src/TrajectoryGenerator.h` | `GenerateTrajectory` + `solveQuadratic` declarations, `TOLERANCE = 1e-6` |
-| `src/TrajectoryGenerator.cpp` | **The file being worked on.** Brake distance calculation *and* the motion equations, in one function |
-| `src/MainWindow.cpp/.h` | Qt6 UI: brake test rig, 3 charts (position/velocity/acceleration) |
-| `src/OnlineWindow.cpp/.h` | Qt6 UI: **online rig**, handwheel slider + 4 charts (position/velocity/acceleration/jerk) |
-| `src/online_main.cpp` | Entry point of the online rig |
-| `src/main.cpp` | Entry point of the brake rig |
-| `src/Profilerold.h/.cpp` | Point-to-point profiler, 7-segment S-curve, peak-velocity solver. Renamed to `...old` by the user once the work moved online; still in CMakeLists so it keeps compiling |
-| `src/sample.cpp` | **Reference only, does not compile.** The old point-to-point profiler |
-| `src/motionold.cpp` | **Reference only, does not compile.** The user's old scan based generator |
+| `src/TrajectoryGenerator.h` | **The core's whole interface**: `MotionState`, `MotionLimits`, `TrajectoryStep`, `GenerateTrajectory`, `BrakeDistance`, `solveQuadratic`, `TOLERANCE`, `BISECTION_STEPS` |
+| `src/TrajectoryGenerator.cpp` | **The file being worked on.** The brake distance tree and the scan's jerk search |
+| `src/OnlineWindow.cpp/.h` | Qt6 UI: **the test rig**, handwheel slider + 4 charts (position/velocity/acceleration/jerk) |
+| `src/online_main.cpp` | Entry point of the rig |
 | `docs/*.drawio` | Jerk-limited profile diagrams, decision tree draft |
 
-`sample.cpp` and `motionold.cpp` are both in `.gitignore`.
-
-`sample.cpp` is not in CMakeLists and includes a `profiler.h` that does not exist — do not
-try to compile it, just read it.
+That is the whole tree now. `Axis.h`, `MainWindow.*`, `main.cpp`, `Profilerold.*` and `sample.cpp`
+were all removed on 2026-09-13 (`Axis.h` and the brake rig by this session, the rest by the user).
+The sections further down that discuss `Profilerold` and `sample.cpp` are kept because their findings
+still matter — but the files are gone, so treat them as history, not as things to read.
 
 ## Why sample.cpp matters
 
@@ -125,12 +268,13 @@ tried to take the current values into account but stayed point-to-point. Still:
 ```bash
 cmake -B build -S .
 cmake --build build -j
-./build/onlinetest        # online tracking rig, the current stage
-./build/braketest         # brake distance rig, the previous stage
+./build/onlinetest        # the only binary: the test rig for the core
 ```
 
-Binaries are named after the test they carry, not after the project. Renaming the target
-means the CMake cache has to be thrown away (`rm -rf build`) before reconfiguring.
+`braketest` was removed 2026-09-13 — it drove the core through `AxisState::Stopping` and waited for
+`Idle`, neither of which exists any more, so it had silently stopped testing anything. The rig shows
+the brake distance anyway. Renaming a target means the CMake cache has to be thrown away
+(`rm -rf build`) before reconfiguring.
 
 Syntax check only:
 
@@ -158,8 +302,10 @@ does not see it. Both binaries build clean on Apple clang (2026-09-13).
   Do not write long derivations or explanation blocks — the user does not want them,
   one line is enough.
 - Allman braces (`{` on its own line), 4 space indent.
-- Formulas are written out **fully parenthesized and unsimplified**. Do not extract them
-  into helper functions, leave them inline.
+- Formulas are written out **fully parenthesized and unsimplified**, and left inline where they are
+  used. Pulling a *reusable quantity* out into its own function is fine when something else has to
+  evaluate it — `BrakeDistance` is one, the scan-loop feasibility search has to call it on a
+  predicted state. (The old rule said never to extract; dropped 2026-09-13 on the user's call.)
 - Literal constants like `0.1666667` are used instead of `1.0/6.0`. Keep doing that.
 - Cases are laid out as a **decision tree** of `if / else if / else`, with a comment at the
   top of each branch naming the condition it handles.
@@ -1043,6 +1189,251 @@ use is the in-position park test — `diff_pos < InPositionWindow && brake_dista
 a wrong brake distance could not produce the remaining overshoot. What is left is the `x_null` ->
 `vel_command` -> `a` -> `x_null` feedback written up above.
 
+### Root cause of the remaining overshoot, both phases — diagnosed 2026-09-13
+
+**Every constraint is tested against the state at the start of the scan, but the jerk chosen binds
+the state at the end of it.** One scan of lateness is one scan of excess, and a jerk limited axis
+cannot give it back.
+
+*Speeding up:* the ideal profile holds `a = max_acc` until `v = 100` and then applies full negative
+jerk for 0.2 s, landing on `v = 200` with `a = 0`. The switch is noticed one scan late, so the axis
+gains `max_acc * deltaTime = 1.0 mm/s` that can never be returned — and 1.0 mm/s is exactly the
+measured excursion. In the trace, at `a = 240` the ideal has `v = 194.24` and the real axis `v = 195.24`.
+
+*Slowing down:* the same with distance — the brake is started one scan late and the extra ground is
+not recoverable, so the axis passes the target.
+
+**Demonstrated cure.** A prototype that picks, every scan, the **largest jerk whose end-of-scan state
+is still feasible**:
+
+```
+v' + a'|a'|/(2*jerk) <= max_vel        the velocity limit
+brake_distance(v', a') <= d'           the position
+-max_dec <= a' <= max_acc              the acceleration
+```
+
+and, when nothing is feasible, brakes the motion it has as hard as allowed (the fallback matters: an
+earlier version fell back to `-jerk`, which accelerates an axis that is already running *away* from
+the target — it diverged to 9300 mm/s).
+
+| 200 moves, same seed | current code | prototype |
+|---|---|---|
+| overshoot @2 / 1 / 0.2 ms | 0.394377 / 0.016735 / 0.000001 mm | **0.000000 / 0.000000 / 0.000000** |
+| backwards velocity @1 ms | 17.22 mm/s | **0.0295** |
+| zero crossings @1 ms | 323 | **0** |
+| over `max_vel` @1 ms | 1.0 mm/s | **4.3e-13** |
+| distance left @1 ms | 0.0096 mm | **0.00006** |
+
+Acceleration limit exceeded 0, jerk 5.6e-11. The overshoot disappears in **both** phases and not one
+zero crossing is left.
+
+This also puts `brake_distance` back in the control path — as a **feasibility test on the predicted
+state**, which is what it is good for, not as a regulation target (that is the use that fed back on
+itself and failed). It was already verified exact against integration.
+
+**Two structural changes it needs, not made yet:** the brake tree has to become a callable function
+(it is inline in `GenerateTrajectory` today) so the predicted state can be tested, and each scan needs
+a fixed-step bisection on the jerk (50 steps in the prototype; `Profilerold` already uses a 100 step
+bisection, so there is precedent, but it sits against this file's "do not extract formulas into
+helpers" note).
+
+### The end-of-scan feasibility search, applied 2026-09-13
+
+The brake tree is now a function — `double BrakeDistance(double cur_vel, double cur_acc, double
+max_dec, double jerk)` in `TrajectoryGenerator.h/.cpp` — because the scan loop has to evaluate it on a
+*predicted* state. `BISECTION_STEPS = 50` sits next to `TOLERANCE`; `Profilerold` already carries a
+100 step bisection, so there is precedent in the project. The "never extract a formula" style rule was
+dropped on the user's call.
+
+`GenerateTrajectory`'s motion section is now: park if in position, otherwise **search the jerk** —
+the largest one whose end-of-scan state still satisfies
+
+```
+-acc_limit_down <= a' <= acc_limit_up                 (the speed-based limit rule, restored)
+v' + a'|a'|/(2*jerk) <= max_vel
+BrakeDistance(v', a') <= d'
+```
+
+falling back, when nothing is feasible, to braking the motion the axis has as hard as allowed.
+
+**What the search is really finding is the switch instant, not a jerk level.** The jerk is a constant
+`±Jerk`; what is unknown each scan is *when inside the scan* it should switch, and that instant almost
+never lands on a scan boundary. Applying `+Jerk` for 0.4 of a scan and `0` for the rest raises the
+acceleration by the same amount as applying `2000` for the whole scan — so an intermediate value is
+how "the switch fell 40% into this scan" is written down, not a new jerk level. The bisection is a
+stopwatch, not a control law: 15 halvings pin the switch instant to 1/32768 of a scan.
+
+`BISECTION_STEPS` is **not** a lookahead or a buffer — nothing is precomputed and nothing is kept
+between scans. It is the number of halvings of a binary search over **one scalar**, the jerk for this
+scan: feasibility is monotone in it, so the feasible jerks form a single interval and the search finds
+its upper end. Cost measured over 200k scans at -O2: **0.147 us** per `GenerateTrajectory` call at 15
+steps, 0.165 us at 20 — 0.015% of a 1 ms cycle — and only **11** `BrakeDistance` calls per scan on
+average, not one per step, because `acc_ok && vel_ok && pos_ok` short-circuits before the expensive
+test in most iterations.
+
+How many steps are actually needed, 200 moves at 1 ms (overshoot is 0 at every count):
+
+| steps | backwards | distance left | over `max_vel` |
+|---|---|---|---|
+| 8 | 0.5103 mm/s | 0.00989 mm | 3.9e-05 |
+| 12 | 0.0328 | 0.00170 | 4.9e-06 |
+| **16** | **0.0289** | **0.00011** | **3.4e-13** |
+| 20 | 0.0297 | 0.00007 | 6.5e-13 |
+| 50 | 0.0295 | 0.00006 | 4.3e-13 |
+
+It saturates at 16; below that the landing error and the limit excursions grow, above it nothing is
+gained. 16-20 is the sweet spot.
+
+**The search could not reach the limit (found 2026-09-13, fixed).** A bisection only ever tests
+midpoints, so `jerk_lo` converged *towards* `+Jerk` without reaching it — at 15 steps the jerk output
+read 4999.7 instead of 5000 in every saturated phase. One line fixes it: if no midpoint was ever
+infeasible then the boundary lies above the limit, so the limit itself is feasible and is applied
+exactly. With it, 15 steps now match what 50 used to give:
+
+| 200 moves, 15 steps | before | after |
+|---|---|---|
+| scans reading exactly `\|jerk\| = Jerk` | 24.0% | **48.4%** |
+| backwards velocity @1 ms | 0.1279 mm/s | **0.0295** |
+| distance left @1 ms | 0.00679 mm | **0.00006** |
+| over `max_vel` @1 ms | 4.4e-05 | **2.8e-13** |
+
+**The jerk stays bang-bang, and the fractional scans are load-bearing.** Measured with a 1 mm/s^3
+tolerance: ~48% of scans at exactly `±Jerk`, ~51% at zero, and **0.20%** carrying a genuinely
+intermediate value — those are the switching scans, where the switch falls partway through the scan
+and the fraction is how that is expressed. Snapping the jerk to `-Jerk / 0 / +Jerk` instead sends the
+overshoot from 0.000000 to **3.156 mm** at 1 ms and the zero crossings from 0 to 3332. The jerk limit
+itself is never exceeded either way (worst 5.6e-11).
+
+Checked and not a problem: `vel_ok` is written one-sided (`<= max_vel`, no lower bound). Making it
+two-sided changes nothing measurable, because the search always takes the *largest* feasible jerk and
+so never chooses to accelerate away from the target. The 67.98 mm/s velocity excursion in the
+bidirectional sweep is the documented start-state limit (`a0^2/(2*jerk)`, up to 100 mm/s at
+`a0 = 1000`), not this.
+
+**Moves from rest are now exact:**
+
+| 200 moves | 2 ms | 1 ms | 0.2 ms | 0.1 ms |
+|---|---|---|---|---|
+| overshoot | 0.00000 | 0.00000 | 0.00000 | 0.00000 mm |
+| zero crossings | 0 | 0 | 0 | 0 |
+| backwards velocity | 0.117 | 0.030 | 0.001 | 0.000 mm/s |
+| over `max_vel` | 8e-13 | 4e-13 | 0 | 1e-11 |
+
+`max_acc` and `max_dec` never exceeded, jerk 5.7e-10, mirror symmetry exactly 0, and the rig's step
+parks at 0.703 s with **no zero crossing at all**. The brake tree is unchanged by the extraction —
+still 0.0000 mm against the integration.
+
+**What is still open: the position test is direction-blind.** 189 of 20000 random `(target, v0, a0)`
+states — the kind the handwheel produces — still ring. Traced:
+
+```
+   t        err   vel_dir   acc_dir |    jerk   feasible?   bd(end)   diff_end
+ 0.204  -5.54451   -5.272   +592.79 |   +5000        yes    0.01871    5.54948
+ 0.216  -5.56370   +2.157   +622.79 |   -5000         NO    7.19198    5.56123
+```
+
+While the axis runs *away* from the target, `BrakeDistance` reports the distance to standstill **in
+the direction it is going** — 0.019 mm — so the test passes and the search keeps raising the
+acceleration, to +622. The scan the velocity crosses zero, the axis is pointed at the target with
++622 on it, and a full stop from there needs 7.19 mm against the 5.56 that are left: the overshoot is
+committed at the turnaround, one scan after the test last said "fine".
+
+The quantity the test needs is not the one `BrakeDistance` returns. It needs the **signed displacement
+to reach `(v = 0, a = 0)`**, not the distance until the velocity alone reaches zero. The two differ
+exactly in the over-braking regime, where the acceleration survives standstill and picks the axis up
+again — which is precisely the bucket where the tree and `Profilerold` disagreed when they were
+compared (tree 0.0000, Profilerold 26.9493). So that disagreement was the two answering different
+questions, and the feasibility test wants Profilerold's. (Profilerold is still wrong in the other
+buckets.) Asked the user whether to add a second function or widen `BrakeDistance`; not done.
+
+### The limits have to be ordered — guard and random button, 2026-09-13
+
+`jerk >= max_acc, max_dec >= max_vel`. The other way round the profile degenerates: with the jerk
+under the acceleration limits the acceleration ramp alone outlasts the move, with the acceleration
+limits under the velocity one the velocity ramp does, and the axis never takes a proper step. Two
+places now hold the rule:
+
+- **`GenerateTrajectory`** orders them into its own locals (`max_acc = max(MaxAcceleration, max_vel)`
+  and so on). The caller's `Axis` is **never written** — a parameter the user set stays set. That is
+  deliberate: `motionold.cpp`'s documented bug was writing `MaxVelocity = 0` back into the caller and
+  destroying it permanently. If `max_vel <= 0` the outputs are zeroed and the scan returns.
+- **the rig's "Rastgele adım"** now randomises the four limits along with the target: `max_vel`
+  10..500, `max_acc` and `max_dec` 1..10x that, `jerk` 1..10x the larger of the two. The four spin
+  boxes are written with their signals blocked and `applyParams` is called once.
+
+Verified with the limits randomised as well, 3000 moves per scan period, 300 s budget each:
+
+| dt | overshoot | crossings | unsettled | distance left | over `max_vel` | over `max_acc` | over `max_dec` | over `Jerk` |
+|---|---|---|---|---|---|---|---|---|
+| 2 ms | 0.1033 mm | 27 | 0 | 0.0098 | 3.1e-3 | **0** | **0** | 2.2e-10 |
+| 1 ms | **0.0000000** | **0** | 0 | 0.0087 | 1.0e-3 | **0** | **0** | 4.4e-10 |
+| 0.2 ms | **0.0000000** | **0** | 0 | 0.0052 | 3.6e-5 | **0** | **0** | 2.2e-9 |
+
+The single 2 ms overshoot is an extreme ratio — `max_dec` only 1.36x `max_vel` while `max_acc` is
+7.3x — and it is gone by 1 ms. Earlier runs showed a handful of "unsettled" moves; those were only
+the time budget (`max_vel` as low as 10 mm/s over a 400 mm target needs 40 s), not a failure.
+
+### Feed override and software limits — added 2026-09-13
+
+**`Axis.FeedOverride`** (default 1.0). It scales the **velocity limit only**: `vel_limit = max_vel *
+max(FeedOverride, 0)`, used in the feasibility test's velocity check. The acceleration and jerk limits
+are untouched, so a change in the override ramps in by itself under them — no special case, no
+smoothing code. The limit ordering guard keeps using the machine `MaxVelocity`, not the scaled one.
+Verified: peak velocity lands exactly on `200 * override` (2.8e-13 at 1.0, 1.1e-4 at 0.1), an override
+of 0 holds the axis still, and stepping 1.00 -> 0.25 -> 1.00 in the middle of a move exceeds neither
+the acceleration limits nor the jerk (both 0.0e+00).
+
+**Software limits** are enforced by asking **where the axis would come to rest**, not where it is:
+`stop_pos = cur_pos + dir * (pos_end +/- brake_end)` must be inside `[NegativeLimit, PositiveLimit]`.
+The rule has a second half — *or at least closer to the band than the axis already is* — which is what
+lets an axis that starts outside drive back in instead of being frozen. A first version gated the
+whole test on `cur_pos` being inside; that version disabled itself the moment the axis breached by a
+hair and turned a 0.19 mm breach into a **449 mm** one.
+
+With the recovery rule, 2000 moves whose target is deliberately beyond the +/-100 mm limits, with the
+dynamic limits randomised: worst breach **5.99 mm**, and **1995 of 2000** come to rest on the limit.
+The residual breach is the same defect as the direction-blind position test above — `stop_pos` signs
+`brake_end` by `vel_end`, which is meaningless when the velocity is near zero with an acceleration
+still on it. Fixing that one quantity fixes both.
+
+### Readiness for real motion blocks — assessment 2026-09-13
+
+Asked whether motion function blocks could be built on this. Separating the engine from the layer:
+
+**Trustworthy today.** The brake tree (0.0000 mm against a 2e-7 s integration over 2991 states, every
+regime and both directions). The scan law for moves from standstill — with the limits randomised too,
+3000 moves per scan period: zero overshoot and zero zero-crossings at 1 ms and below, `max_acc` and
+`max_dec` never exceeded, jerk to 4e-10, the two directions bit-identical. Real-time behaviour is
+sound: no allocation, no recursion, no unbounded loop in the scan path, the bisection is fixed-step so
+the cost is deterministic at 0.15 us per scan, and nothing is kept between scans. The one
+`solveQuadratic` call site now takes `a = 0.5 * jerk` with `jerk > 0` guaranteed by the limit guard, so
+the missing `a == 0` check (open bug 5) is unreachable from here.
+
+**Not ready.**
+
+1. **The direction-blind position test** (written up above) — 189 of 20000 random `(v, a)` start states
+   still ring. That state is exactly "the target moved while the axis was running", which is what
+   `MC_MoveAbsolute` over `MC_MoveAbsolute`, blending and an intervening `MC_Stop` all produce. This is
+   the blocker.
+2. **Software limits are not consulted anywhere** — `NegativeLimit` / `PositiveLimit` appear only in
+   `Axis.h`; grep finds no reference in the generator or the rig.
+3. ~~**No block semantics.**~~ **Corrected by the user 2026-09-13: block semantics are deliberately
+   out of scope.** This repo is the **generic core** a user builds their own blocks on — the state
+   machine, `Done`/`Busy`/`CommandAborted`, buffer modes and `MC_Stop` priority belong to the caller.
+   What the repo *does* owe is every motion feature the core needs: limits, feed override, software
+   limits, and the kinematics.
+4. ~~**No feed override.**~~ Added 2026-09-13, see above. A raw `MaxVelocity` change still applies on
+   the next scan with no ramp on the command (the motion stays jerk limited, only the command steps).
+5. **The verification is simulation only, and mostly against this file's own formulas.** The one
+   independent reference is numerical integration. Nothing has run on a drive; scan jitter, a
+   a drive that cannot follow the jerk command are unmodelled. **`deltaTime` stays a plain parameter
+   by the user's decision (2026-09-13): calling the core deterministically is the integrator's
+   responsibility, not the core's.**
+
+**Remaining, in order:** (1) the signed `(v, a) -> (0, 0)` displacement — it fixes the direction-blind
+position test *and* the residual software-limit breach, which are the same defect; (2) a test on real
+hardware with real scan jitter. Software limits and feed override are done.
+
 ### Tried on the way and rejected
 
 - **`vel_stoppable(d, a)` as the velocity command.** The inversion itself is right — verified against
@@ -1128,7 +1519,60 @@ The window branch in front makes it rare but it is still there.
 - Point out bugs, but do not fix them unprompted — ask first.
 
 ---
-*Last update: 2026-09-13 (later the same day) — the user suspected `brake_distance`; **checked and
+*Last update: 2026-09-13 (later the same day) — velocity mode and the position mode were merged into
+**one `GenerateTrajectory` split by a single `if`**, with a small `MotionCommand` struct naming the
+unit of `Target` at the call site; behaviour re-measured afterwards and unchanged. `docs/rig.mp4`
+added: a 20 s offscreen recording of the rig (random commands, handwheel, random commands).*
+
+*Previous update: 2026-09-13 (later the same day) — **velocity mode added**: `GenerateVelocityStep`, with
+both modes sharing one `ScanStep` body so the open defect gets fixed once. 2000/2000 runs reach the
+command exactly at every scan period, velocity limit held to 0.0e+00, software limits stop a velocity
+command dead on the limit. Three real defects were found on the way — a clamp that could break the
+jerk limit (pre-existing), a park that skipped the software limits, and a fallback pointing the wrong
+way — all fixed and written up above, along with two that are still open. Position mode is unchanged.*
+
+*Previous update: 2026-09-13 (later the same day) — `README.md` rewritten as the outward-facing
+description (what it is, why scan-based, where it applies, the measured verification table, and an
+explicit list of what is **not** verified), with `docs/rig.png` captured offscreen from the rig.*
+
+*Previous update: 2026-09-13 (later the same day) — **the core was pulled out of the axis.** `Axis.h` is
+gone; `GenerateTrajectory` is now a pure function over `MotionState` / `MotionLimits` returning a
+`TrajectoryStep`, owning nothing and keeping nothing between calls. `FeedOverride` was added and then
+removed — a feed override is a scaled `MaxVelocity` the caller hands in. Software limits stay in the
+core (the caller cannot enforce them without re-deriving the brake logic); the rig got spin boxes for
+them. `braketest` was deleted: it drove the core through `AxisState::Stopping` and waited for `Idle`,
+neither of which had existed since the rewrite, so it had silently stopped testing anything. Behaviour
+is unchanged by the refactor — same numbers through the new interface: zero overshoot and zero
+crossings at 1 ms and below with the limits randomised, software limits 999/1000 resting on the limit.
+Block semantics, buffering and blending are the caller's, by the user's decision.*
+
+*Previous update: 2026-09-13 (later the same day) — the limit ordering rule (`jerk >= acc/dec >= vel`) is
+enforced in two places: `GenerateTrajectory` orders them into locals without ever writing the caller's
+`Axis`, and the rig's random button now randomises all four limits under that rule along with the
+target. Re-verified with the limits randomised too — 3000 moves per scan period, zero overshoot and
+zero crossings at 1 ms and below, acceleration limits never exceeded. Also fixed the bisection never
+reaching `±Jerk` (it only converged towards it), which brought 15 steps up to the quality 50 used to
+give.*
+
+*Previous update: 2026-09-13 (later the same day) — **the end-of-scan feasibility search is applied**. The
+brake tree is now the function `BrakeDistance(...)`, the motion section searches the jerk each scan,
+and the old "never extract a formula" style rule is gone. Moves from rest are exact: zero overshoot,
+zero crossings, limits held to 1e-10, the rig's step parks in 0.70 s without crossing the target once.
+Still open: 189 of 20000 random `(v, a)` start states ring, because the position test uses
+`BrakeDistance`, which is direction-blind — while the axis runs away from the target it reports the
+distance to standstill the other way, so the search raises the acceleration until the turnaround
+commits the overshoot. The test needs the signed displacement to `(v = 0, a = 0)` instead. Asked which
+shape that should take.*
+
+*Previous update: 2026-09-13 (later the same day) — **root cause of the overshoot in both phases found**:
+every constraint is tested on the state at the start of the scan while the jerk chosen binds the state
+at the end of it, so the switch is always one scan late and the excess (1.0 mm/s at the velocity limit,
+the matching distance at the target) cannot be given back. A prototype that instead picks the largest
+jerk whose end-of-scan state is still feasible removes the overshoot completely — 0.000000 mm at every
+scan period, zero crossings, velocity limit held to 4e-13. Written up above with the two structural
+changes it would need. No code changed.*
+
+*Previous update: 2026-09-13 (later the same day) — the user suspected `brake_distance`; **checked and
 ruled out**. The tree matches a 2e-7 s integration of the optimal brake to 0.0000 mm over 2991 random
 states, while `Profilerold::BrakeDistance` is off by up to 24.16 mm on states whose velocity and
 acceleration have opposite signs — so that file is the wrong one to copy from, and its own 200k

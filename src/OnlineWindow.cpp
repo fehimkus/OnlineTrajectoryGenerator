@@ -54,7 +54,6 @@ OnlineWindow::OnlineWindow(QWidget* parent)
 {
     setWindowTitle(tr("Online Yörünge Üreteci — El Çarkı Testi"));
 
-    m_axis.CurrentState = AxisState::Tracking;      // the online branch of GenerateTrajectory
 
     auto* split = new QSplitter(Qt::Horizontal, this);
     split->addWidget(buildControlPanel());
@@ -226,7 +225,7 @@ QWidget* OnlineWindow::buildChartArea()
                           { COL_ACTUAL, COL_TARGET, COL_THIRD },
                           { false, true, true }, false);
     m_velPane  = makePane(tr("Hız (mm/s)"),
-                          { tr("Gerçek"), tr("Hız komutu") },
+                          { tr("Gerçek"), tr("Durulma hızı") },
                           { COL_ACTUAL, COL_TARGET },
                           { false, true }, true);
     m_accPane  = makePane(tr("İvme (mm/s²)"),
@@ -316,7 +315,11 @@ QWidget* OnlineWindow::buildControlPanel()
     limForm->addRow(tr("Maks. hız"), m_spMaxVel);
     limForm->addRow(tr("Maks. ivme"), m_spMaxAcc);
     limForm->addRow(tr("Maks. yavaşlama"), m_spMaxDec);
+    m_spNegLimit = makeSpin(-100000.0, 100000.0, -1000.0, 10.0, tr(" mm"), 3);
+    m_spPosLimit = makeSpin(-100000.0, 100000.0, 1000.0, 10.0, tr(" mm"), 3);
     limForm->addRow(tr("Jerk"), m_spJerk);
+    limForm->addRow(tr("Negatif limit"), m_spNegLimit);
+    limForm->addRow(tr("Pozitif limit"), m_spPosLimit);
     limForm->addRow(tr("Konum penceresi"), m_spWindow);
     col->addWidget(gbLim);
 
@@ -344,7 +347,7 @@ QWidget* OnlineWindow::buildControlPanel()
     m_lblVel    = addOut(tr("Hız"));
     m_lblAcc    = addOut(tr("İvme"));
     m_lblJerk   = addOut(tr("Uygulanan jerk"));
-    m_lblVelCmd = addOut(tr("Hız komutu"));
+    m_lblVelCmd = addOut(tr("Durulma hızı"));
     m_lblBrake  = addOut(tr("Fren mesafesi"));
     m_lblStop   = addOut(tr("Tahmini duruş"));
     m_lblError  = addOut(tr("Takip hatası"));
@@ -365,7 +368,7 @@ QWidget* OnlineWindow::buildControlPanel()
     connect(btnReset, &QPushButton::clicked, this, &OnlineWindow::onReset);
     connect(m_btnPause, &QPushButton::clicked, this, &OnlineWindow::onPauseToggled);
 
-    for (QDoubleSpinBox* sp : { m_spMaxVel, m_spMaxAcc, m_spMaxDec, m_spJerk,
+    for (QDoubleSpinBox* sp : { m_spMaxVel, m_spMaxAcc, m_spMaxDec, m_spJerk, m_spNegLimit, m_spPosLimit,
                                 m_spWindow, m_spScan })
     {
         connect(sp, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
@@ -418,8 +421,32 @@ void OnlineWindow::onCentre()
 
 void OnlineWindow::onRandomStep()
 {
+    auto* rng = QRandomGenerator::global();
+
+    // the limits go in ordered: jerk >= the acceleration limits >= max velocity. the other way round
+    // the profile degenerates - the acceleration ramp alone outlasts the move and the axis never
+    // takes a proper step, so a random combination that breaks the order tests nothing
+    const double vel = 10.0 + (rng->generateDouble() * 490.0);
+    const double acc = vel * (1.0 + (rng->generateDouble() * 9.0));
+    const double dec = vel * (1.0 + (rng->generateDouble() * 9.0));
+    const double jrk = std::max(acc, dec) * (1.0 + (rng->generateDouble() * 9.0));
+
+    for (QDoubleSpinBox* sp : { m_spMaxVel, m_spMaxAcc, m_spMaxDec, m_spJerk })
+    {
+        sp->blockSignals(true);     // applyParams is called once at the end instead of four times
+    }
+    m_spMaxVel->setValue(vel);
+    m_spMaxAcc->setValue(acc);
+    m_spMaxDec->setValue(dec);
+    m_spJerk->setValue(jrk);
+    for (QDoubleSpinBox* sp : { m_spMaxVel, m_spMaxAcc, m_spMaxDec, m_spJerk })
+    {
+        sp->blockSignals(false);
+    }
+    applyParams();
+
     const double travel = m_spTravel->value();
-    setTarget(QRandomGenerator::global()->generateDouble() * 2.0 * travel - travel, false);
+    setTarget(rng->generateDouble() * 2.0 * travel - travel, false);
 }
 
 void OnlineWindow::onPauseToggled()
@@ -430,12 +457,11 @@ void OnlineWindow::onPauseToggled()
 
 void OnlineWindow::onReset()
 {
-    m_axis.CurrentPosition = 0.0;
-    m_axis.CurrentVelocity = 0.0;
-    m_axis.CurrentAcceleration = 0.0;
-    m_axis.BrakeDistance = 0.0;
-    m_axis.CommandedJerk = 0.0;
-    m_axis.VelocityCommand = 0.0;
+    m_state.Position = 0.0;
+    m_state.Velocity = 0.0;
+    m_state.Acceleration = 0.0;
+    m_step.BrakeDistance = 0.0;
+    m_step.Jerk = 0.0;
     m_time = 0.0;
     m_chartAccum = 0.0;
     m_peakVel = 0.0;
@@ -452,22 +478,31 @@ void OnlineWindow::onReset()
 
 void OnlineWindow::applyParams()
 {
-    m_axis.MaxVelocity = m_spMaxVel->value();
-    m_axis.MaxAcceleration = m_spMaxAcc->value();
-    m_axis.MaxDeceleration = m_spMaxDec->value();
-    m_axis.Jerk = m_spJerk->value();
-    m_axis.InPositionWindow = m_spWindow->value();
+    m_limits.MaxVelocity = m_spMaxVel->value();
+    m_limits.MaxAcceleration = m_spMaxAcc->value();
+    m_limits.MaxDeceleration = m_spMaxDec->value();
+    m_limits.Jerk = m_spJerk->value();
+    m_limits.InPositionWindow = m_spWindow->value();
+    m_limits.NegativeLimit = m_spNegLimit->value();
+    m_limits.PositiveLimit = m_spPosLimit->value();
     m_dt = m_spScan->value() / 1000.0;
 
     // one chart sample every few scans is plenty, the window only holds MAX_POINTS anyway
     m_chartDt = std::max(m_dt, m_spWindowSec->value() / static_cast<double>(MAX_POINTS));
 
-    m_velPane.limHiVal = m_axis.MaxVelocity;
-    m_velPane.limLoVal = -m_axis.MaxVelocity;
-    m_accPane.limHiVal = m_axis.MaxAcceleration;
-    m_accPane.limLoVal = -m_axis.MaxDeceleration;
-    m_jerkPane.limHiVal = m_axis.Jerk;
-    m_jerkPane.limLoVal = -m_axis.Jerk;
+    m_velPane.limHiVal = m_limits.MaxVelocity;
+    m_velPane.limLoVal = -m_limits.MaxVelocity;
+    m_accPane.limHiVal = m_limits.MaxAcceleration;
+    m_accPane.limLoVal = -m_limits.MaxDeceleration;
+    m_jerkPane.limHiVal = m_limits.Jerk;
+    m_jerkPane.limLoVal = -m_limits.Jerk;
+}
+
+// where the velocity settles if the acceleration is nulled from here - the quantity the velocity
+// limit is really asked about, and what the rig charts in place of the old velocity command
+static double settleVelocity(const MotionState& st, const MotionLimits& lim)
+{
+    return st.Velocity + ((st.Acceleration * std::fabs(st.Acceleration)) / (2.0 * lim.Jerk));
 }
 
 // ---------------------------------------------------------------- the scan loop
@@ -490,16 +525,15 @@ void OnlineWindow::onTick()
     {
         // the handwheel is sampled inside the scan loop, exactly like a real encoder read:
         // the generator is given a fresh target on every single scan
-        m_axis.TargetPosition = m_targetInput;
-
-        GenerateTrajectory(m_axis, m_dt);
+        m_step = GenerateTrajectory(m_state, m_limits, { MotionCommandKind::Position, m_targetInput }, m_dt);
+        m_state = m_step.State;
 
         m_time += m_dt;
 
-        const double err = m_axis.TargetPosition - m_axis.CurrentPosition;
-        m_peakVel = std::max(m_peakVel, std::fabs(m_axis.CurrentVelocity));
-        m_peakAcc = std::max(m_peakAcc, std::fabs(m_axis.CurrentAcceleration));
-        m_peakJerk = std::max(m_peakJerk, std::fabs(m_axis.CommandedJerk));
+        const double err = m_targetInput - m_state.Position;
+        m_peakVel = std::max(m_peakVel, std::fabs(m_state.Velocity));
+        m_peakAcc = std::max(m_peakAcc, std::fabs(m_state.Acceleration));
+        m_peakJerk = std::max(m_peakJerk, std::fabs(m_step.Jerk));
         m_peakError = std::max(m_peakError, std::fabs(err));
 
         m_chartAccum += m_dt;
@@ -508,18 +542,18 @@ void OnlineWindow::onTick()
             m_chartAccum = 0.0;
 
             // where the axis would come to rest if it started braking on this scan
-            const double dirMotion = (std::fabs(m_axis.CurrentVelocity) > TOLERANCE)
-                                         ? ((m_axis.CurrentVelocity < 0.0) ? -1.0 : 1.0)
-                                         : ((m_axis.CurrentAcceleration < 0.0) ? -1.0 : 1.0);
-            const double stopPos = m_axis.CurrentPosition + (m_axis.BrakeDistance * dirMotion);
+            const double dirMotion = (std::fabs(m_state.Velocity) > TOLERANCE)
+                                         ? ((m_state.Velocity < 0.0) ? -1.0 : 1.0)
+                                         : ((m_state.Acceleration < 0.0) ? -1.0 : 1.0);
+            const double stopPos = m_state.Position + (m_step.BrakeDistance * dirMotion);
 
-            pushSample(m_posPane, 0, m_time, m_axis.CurrentPosition);
-            pushSample(m_posPane, 1, m_time, m_axis.TargetPosition);
+            pushSample(m_posPane, 0, m_time, m_state.Position);
+            pushSample(m_posPane, 1, m_time, m_targetInput);
             pushSample(m_posPane, 2, m_time, stopPos);
-            pushSample(m_velPane, 0, m_time, m_axis.CurrentVelocity);
-            pushSample(m_velPane, 1, m_time, m_axis.VelocityCommand);
-            pushSample(m_accPane, 0, m_time, m_axis.CurrentAcceleration);
-            pushSample(m_jerkPane, 0, m_time, m_axis.CommandedJerk);
+            pushSample(m_velPane, 0, m_time, m_state.Velocity);
+            pushSample(m_velPane, 1, m_time, settleVelocity(m_state, m_limits));
+            pushSample(m_accPane, 0, m_time, m_state.Acceleration);
+            pushSample(m_jerkPane, 0, m_time, m_step.Jerk);
         }
     }
 
@@ -536,23 +570,23 @@ void OnlineWindow::onTick()
 
 void OnlineWindow::updateLabels()
 {
-    const double err = m_axis.TargetPosition - m_axis.CurrentPosition;
-    const double dirMotion = (std::fabs(m_axis.CurrentVelocity) > TOLERANCE)
-                                 ? ((m_axis.CurrentVelocity < 0.0) ? -1.0 : 1.0)
-                                 : ((m_axis.CurrentAcceleration < 0.0) ? -1.0 : 1.0);
-    const double stopPos = m_axis.CurrentPosition + (m_axis.BrakeDistance * dirMotion);
+    const double err = m_targetInput - m_state.Position;
+    const double dirMotion = (std::fabs(m_state.Velocity) > TOLERANCE)
+                                 ? ((m_state.Velocity < 0.0) ? -1.0 : 1.0)
+                                 : ((m_state.Acceleration < 0.0) ? -1.0 : 1.0);
+    const double stopPos = m_state.Position + (m_step.BrakeDistance * dirMotion);
 
-    m_lblPos->setText(num(m_axis.CurrentPosition, 5) + tr(" mm"));
-    m_lblVel->setText(num(m_axis.CurrentVelocity, 3) + tr(" mm/s"));
-    m_lblAcc->setText(num(m_axis.CurrentAcceleration, 2) + tr(" mm/s²"));
-    m_lblJerk->setText(num(m_axis.CommandedJerk, 1) + tr(" mm/s³"));
-    m_lblVelCmd->setText(num(m_axis.VelocityCommand, 3) + tr(" mm/s"));
-    m_lblBrake->setText(num(m_axis.BrakeDistance, 5) + tr(" mm"));
+    m_lblPos->setText(num(m_state.Position, 5) + tr(" mm"));
+    m_lblVel->setText(num(m_state.Velocity, 3) + tr(" mm/s"));
+    m_lblAcc->setText(num(m_state.Acceleration, 2) + tr(" mm/s²"));
+    m_lblJerk->setText(num(m_step.Jerk, 1) + tr(" mm/s³"));
+    m_lblVelCmd->setText(num(settleVelocity(m_state, m_limits), 3) + tr(" mm/s"));
+    m_lblBrake->setText(num(m_step.BrakeDistance, 5) + tr(" mm"));
     m_lblStop->setText(num(stopPos, 5) + tr(" mm"));
     m_lblError->setText(num(err, 5) + tr(" mm"));
 
-    const bool inPos = (std::fabs(err) < m_axis.InPositionWindow) &&
-                       (std::fabs(m_axis.CurrentVelocity) < TOLERANCE);
+    const bool inPos = (std::fabs(err) < m_limits.InPositionWindow) &&
+                       (std::fabs(m_state.Velocity) < TOLERANCE);
     m_lblInPos->setText(inPos ? tr("evet") : tr("hayır"));
 
     m_lblPeaks->setText(num(m_peakVel, 2) + QStringLiteral(" / ") +

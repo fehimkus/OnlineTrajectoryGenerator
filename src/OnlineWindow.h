@@ -7,7 +7,7 @@
 #include <deque>
 #include <vector>
 
-#include "Axis.h"
+#include "TrajectoryGenerator.h"
 
 class QChart;
 class QLineSeries;
@@ -70,7 +70,9 @@ private:
     void setTarget(double mm, bool fromSlider);
     void rebuildSliderRange();
 
-    Axis m_axis;
+    MotionState m_state;
+    MotionLimits m_limits;
+    TrajectoryStep m_step;
     double m_time = 0.0;                // simulated seconds since the last reset
     double m_dt = 0.001;                // scan period the generator is called with
     double m_targetInput = 0.0;         // what the handwheel says right now, read every scan
@@ -100,6 +102,8 @@ private:
     QDoubleSpinBox* m_spMaxAcc = nullptr;
     QDoubleSpinBox* m_spMaxDec = nullptr;
     QDoubleSpinBox* m_spJerk = nullptr;
+    QDoubleSpinBox* m_spNegLimit = nullptr;
+    QDoubleSpinBox* m_spPosLimit = nullptr;
     QDoubleSpinBox* m_spWindow = nullptr;
 
     // rig settings
